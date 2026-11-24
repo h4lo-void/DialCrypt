@@ -1,0 +1,6 @@
+id=aegischat_audio_firewall
+name=DialCrypt Secure Session (Pixel)
+version=v0.2.0
+versionCode=200
+author=DialCrypt Clean-Room Project (GPL-3.0-only)
+description=Root daemon for DialCrypt secure sessions on Google Pixel: prechecks, journaled lockdown, fail-closed monitoring, boot-time restore hook. Dry run unless /data/adb/aegischat/policy.conf has armed=1.

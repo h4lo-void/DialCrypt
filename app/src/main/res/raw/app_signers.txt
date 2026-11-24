@@ -1,0 +1,4 @@
+# SHA-256 of the app signing certificates accepted in a peer's key attestation, one per line.
+# Test signing key made by tools/android-build/build.sh. Replace with the release key
+# before any real use.
+97f360708b5c9b63c60b550f47ae28529e4b0ea3166e45ef1d3ebe3e343251a9

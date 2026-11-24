@@ -1,0 +1,30 @@
+# DialCrypt: let the App connect to aegiscalld's abstract Unix socket
+# @io.github.h4lovoid.dialcrypt.d. aegiscalld is started by service.sh and therefore runs in
+# the root manager's domain: ksu under KernelSU (measured on the test phones,
+# u:r:ksu:s0) or magisk under Magisk.
+#
+# This is the smallest rule SELinux can express for that:
+#   - one source type (priv_app; the App is installed as a privileged app),
+#   - one class (unix_stream_socket) and one permission (connectto),
+#   - no sendto, no datagram sockets, no binder, no file or process access.
+# SELinux cannot match an abstract socket by name, so the rule also covers
+# other stream sockets a magisk-domain process listens on. The name-level
+# restriction is enforced by the daemon itself: it accepts a peer only after
+# checking SO_PEERCRED uid -> packages.list -> the package manager's signing
+# record against the pinned certificate, and closes every other connection
+# before reading any message.
+#
+# To be confirmed on device (target Pixel, Magisk version in use):
+#   1. The App's domain is priv_app (if it is platform_app or untrusted_app,
+#      change the source type; never widen it to "domain" or "appdomain").
+#   2. Whether Magisk's built-in policy already allows this connection. If
+#      it does, delete this rule and ship an empty file.
+#   3. Whether a dedicated domain for aegiscalld (type + transition) is
+#      workable; that would remove the magisk domain from this rule.
+#   4. KernelSU: that the ksu rule below loads (the ksu type exists only on
+#      KernelSU, the magisk type only on Magisk; check that a rule naming the
+#      missing type is skipped and does not stop the rest of this file) and
+#      that the App can connect with it. The ksu rule is listed first so that
+#      it still applies if the loader stops at the first unknown type.
+allow priv_app ksu unix_stream_socket connectto
+allow priv_app magisk unix_stream_socket connectto

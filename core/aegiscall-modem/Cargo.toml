@@ -1,0 +1,11 @@
+[package]
+name = "aegiscall-modem"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "FormantGuard pseudo-speech cellular modem, soft-decision FEC, and telecom channel simulator"
+
+[dependencies]
+crc.workspace = true
+thiserror.workspace = true

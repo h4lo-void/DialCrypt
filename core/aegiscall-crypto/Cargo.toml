@@ -1,0 +1,35 @@
+[package]
+name = "aegiscall-crypto"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "Hybrid handshake v2 (StrongBox P-256 identity + X25519 + ML-KEM-1024), DH ratchet and frame AEAD"
+
+[features]
+# Exposes test-only simulated hardware SE providers (edition-based trust grading) to other crates' tests.
+simulated-se = []
+# Exposes the software P-256 SoftwareSigner used to drive handshake v2 in other crates' tests.
+test-signer = []
+
+[dependencies]
+aegiscall-memsec = { path = "../aegiscall-memsec" }
+chacha20poly1305.workspace = true
+chacha20.workspace = true
+poly1305.workspace = true
+x25519-dalek.workspace = true
+p256.workspace = true
+ml-kem.workspace = true
+hkdf.workspace = true
+hmac = "0.12"
+sha2.workspace = true
+blake3.workspace = true
+rand_core.workspace = true
+getrandom.workspace = true
+subtle.workspace = true
+zeroize.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+# Lets the fuzz integration tests use SoftwareSigner without passing --features on the command line.
+aegiscall-crypto = { path = ".", features = ["test-signer"] }

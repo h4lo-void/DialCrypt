@@ -1,0 +1,14 @@
+[package]
+name = "modem-wav"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "DialCrypt modem test-signal WAV generator and recorded-call analyzer"
+
+[[bin]]
+name = "modem-wav"
+path = "src/main.rs"
+
+[dependencies]
+aegiscall-modem = { path = "../../core/aegiscall-modem" }

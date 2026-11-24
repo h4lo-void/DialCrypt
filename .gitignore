@@ -1,0 +1,28 @@
+# Rust / Cargo build output
+/target/
+
+# Android / Gradle build output
+.gradle/
+**/build/
+local.properties
+*.apk
+*.aab
+
+# Native libraries and packaged artifacts produced by tools/android-build/build.sh
+app/src/main/jniLibs/
+out/
+
+# Signing and verified-boot key material must never be committed
+*.jks
+*.keystore
+aegis_avb_key.pem
+avb_pkmd.bin
+
+# Local working copies and editor or OS clutter
+/backups/
+*.bak-*
+.idea/
+*.iml
+.kotlin/
+.DS_Store
+Thumbs.db

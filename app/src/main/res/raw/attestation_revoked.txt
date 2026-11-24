@@ -1,0 +1,2 @@
+# Revoked attestation certificate serial numbers, one hex value per line.
+# No entry yet: refresh from Google's attestation status list before a release.

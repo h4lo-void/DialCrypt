@@ -1,0 +1,2 @@
+# verifiedBootKey values (hex, one per line) of self-signed boot images that count as
+# "locked, self-signed". None yet.

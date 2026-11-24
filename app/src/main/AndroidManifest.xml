@@ -1,0 +1,250 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+
+    <!-- AIR-GAPPED INVARIANT:
+         Zero network permissions are declared in this manifest.
+         All encrypted chat packets travel exclusively through cellular voice call audio channels. -->
+
+    <uses-permission android:name="android.permission.CALL_PHONE" />
+    <uses-permission android:name="android.permission.READ_PHONE_STATE" />
+    <!-- Call link: answer and end calls; incoming caller number in the call state callback. -->
+    <uses-permission android:name="android.permission.ANSWER_PHONE_CALLS" />
+    <uses-permission android:name="android.permission.READ_CALL_LOG" />
+    <!-- Call log eraser: removes the system call log entry of a call the app placed or took over. -->
+    <uses-permission android:name="android.permission.WRITE_CALL_LOG" />
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_PHONE_CALL" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
+    <uses-permission android:name="android.permission.MANAGE_OWN_CALLS" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <uses-permission android:name="android.permission.USE_FULL_SCREEN_INTENT" />
+    <uses-permission android:name="android.permission.REORDER_TASKS" />
+    <!-- Lets the app hide other apps' overlay windows while its own windows are shown (API 31+). -->
+    <uses-permission android:name="android.permission.HIDE_OVERLAY_WINDOWS" />
+    <!-- Default dialer: keeps the screen off near the ear during a call. -->
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <!-- Adding a contact in person: scan the other phone's QR code. Frames are only decoded in memory. -->
+    <uses-permission android:name="android.permission.CAMERA" />
+    <uses-feature android:name="android.hardware.camera" android:required="false" />
+    <!-- Optional fingerprint answer of a ringing secure call (off by default). -->
+    <uses-permission android:name="android.permission.USE_BIOMETRIC" />
+
+    <!-- Privileged system permissions granted via /system/etc/permissions/privapp-permissions-aegiscall.xml -->
+    <uses-permission
+        android:name="android.permission.CONTROL_INCALL_EXPERIENCE"
+        tools:ignore="ProtectedPermissions" />
+    <uses-permission
+        android:name="android.permission.CALL_AUDIO_INTERCEPTION"
+        tools:ignore="ProtectedPermissions" />
+    <uses-permission
+        android:name="android.permission.CAPTURE_AUDIO_OUTPUT"
+        tools:ignore="ProtectedPermissions" />
+    <uses-permission
+        android:name="android.permission.MODIFY_AUDIO_SETTINGS_PRIVILEGED"
+        tools:ignore="ProtectedPermissions" />
+    <!-- Call link: answered-call detection, call stream mute and uplink output to TYPE_TELEPHONY. -->
+    <uses-permission
+        android:name="android.permission.READ_PRECISE_PHONE_STATE"
+        tools:ignore="ProtectedPermissions" />
+    <uses-permission
+        android:name="android.permission.MODIFY_PHONE_STATE"
+        tools:ignore="ProtectedPermissions" />
+
+    <application
+        android:allowBackup="false"
+        android:fullBackupContent="false"
+        android:dataExtractionRules="@xml/no_backup_rules"
+        android:label="@string/launcher_label"
+        android:icon="@mipmap/ic_launcher"
+        android:roundIcon="@mipmap/ic_launcher_round"
+        android:supportsRtl="true"
+        android:theme="@style/Theme.DialCrypt">
+
+        <!-- Default process: preparation screen only. No native code, no secrets. -->
+        <activity
+            android:name=".ui.LauncherActivity"
+            android:label="@string/launcher_label"
+            android:exported="true"
+            android:excludeFromRecents="true"
+            android:launchMode="singleTop"
+            android:screenOrientation="portrait"
+            android:configChanges="orientation|screenSize|smallestScreenSize|screenLayout|keyboard|keyboardHidden|navigation|uiMode|density|fontScale|locale|layoutDirection"
+            android:windowSoftInputMode="stateAlwaysHidden">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <!-- Secure process: PIN, contacts, calls, settings. Started only by the launcher. -->
+        <activity
+            android:name=".ui.SecureActivity"
+            android:label="@string/launcher_label"
+            android:process=":secure"
+            android:taskAffinity="io.github.h4lovoid.dialcrypt.secure"
+            android:exported="false"
+            android:excludeFromRecents="true"
+            android:launchMode="singleTask"
+            android:screenOrientation="portrait"
+            android:configChanges="orientation|screenSize|smallestScreenSize|screenLayout|keyboard|keyboardHidden|navigation|uiMode|density|fontScale|locale|layoutDirection"
+            android:windowSoftInputMode="stateAlwaysHidden" />
+
+        <!-- Isolated :call process: Telecom InCallService + relay binder + prompt UI, zero vault/daemon access. -->
+        <service
+            android:name=".incoming.IncomingCallService"
+            android:process=":call"
+            android:permission="android.permission.BIND_INCALL_SERVICE"
+            android:exported="true">
+            <meta-data
+                android:name="android.telecom.IN_CALL_SERVICE_UI"
+                android:value="false" />
+            <meta-data
+                android:name="android.telecom.IN_CALL_SERVICE_RINGING"
+                android:value="true" />
+            <intent-filter>
+                <action android:name="android.telecom.InCallService" />
+            </intent-filter>
+        </service>
+
+        <service
+            android:name=".incoming.CallRelayService"
+            android:process=":call"
+            android:exported="false" />
+
+        <!-- Default dialer in-call service (UI). Telecom binds it only while the app holds the dialer role.
+             The default dialer components are disabled in release builds (dialerComponentsEnabled).
+             directBootAware: a call before the first unlock after boot is drawn here too. Everything this
+             service, the in-call screen and CallActionReceiver reach checks DirectBoot.isUserUnlocked
+             before it reads a file. -->
+        <service
+            android:name=".dialer.DialerInCallService"
+            android:enabled="${dialerComponentsEnabled}"
+            android:directBootAware="true"
+            android:process=":call"
+            android:permission="android.permission.BIND_INCALL_SERVICE"
+            android:exported="true">
+            <meta-data
+                android:name="android.telecom.IN_CALL_SERVICE_UI"
+                android:value="true" />
+            <meta-data
+                android:name="android.telecom.IN_CALL_SERVICE_RINGING"
+                android:value="false" />
+            <intent-filter>
+                <action android:name="android.telecom.InCallService" />
+            </intent-filter>
+        </service>
+
+        <receiver
+            android:name=".dialer.CallActionReceiver"
+            android:directBootAware="true"
+            android:process=":call"
+            android:exported="false" />
+
+        <!-- Default dialer call screen, in :call next to the in-call service whose Call objects it drives. -->
+        <activity
+            android:name=".dialer.InCallActivity"
+            android:label="@string/dialer_label"
+            android:directBootAware="true"
+            android:process=":call"
+            android:taskAffinity="io.github.h4lovoid.dialcrypt.incall"
+            android:exported="false"
+            android:excludeFromRecents="true"
+            android:launchMode="singleInstance"
+            android:showWhenLocked="true"
+            android:turnScreenOn="true"
+            android:screenOrientation="portrait"
+            android:configChanges="orientation|screenSize|smallestScreenSize|screenLayout|keyboard|keyboardHidden|navigation|uiMode|density|fontScale|locale|layoutDirection"
+            android:windowSoftInputMode="stateAlwaysHidden" />
+
+        <!-- Default dialer dial pad. Separate :dialer process: it never touches a Telecom call. -->
+        <activity
+            android:name=".dialer.DialpadActivity"
+            android:enabled="${dialerComponentsEnabled}"
+            android:label="@string/dialer_label"
+            android:process=":dialer"
+            android:taskAffinity="io.github.h4lovoid.dialcrypt.dialer"
+            android:exported="true"
+            android:excludeFromRecents="true"
+            android:launchMode="singleTask"
+            android:screenOrientation="portrait"
+            android:configChanges="orientation|screenSize|smallestScreenSize|screenLayout|keyboard|keyboardHidden|navigation|uiMode|density|fontScale|locale|layoutDirection"
+            android:windowSoftInputMode="stateAlwaysHidden">
+            <intent-filter>
+                <action android:name="android.intent.action.DIAL" />
+                <category android:name="android.intent.category.DEFAULT" />
+            </intent-filter>
+            <intent-filter>
+                <action android:name="android.intent.action.DIAL" />
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="tel" />
+            </intent-filter>
+            <intent-filter>
+                <action android:name="android.intent.action.CALL_BUTTON" />
+                <category android:name="android.intent.category.DEFAULT" />
+            </intent-filter>
+        </activity>
+
+        <!-- Launcher entry "Phone": enabled by DialerRole only while the app holds the dialer role. -->
+        <activity-alias
+            android:name=".dialer.PhoneLauncher"
+            android:targetActivity=".dialer.DialpadActivity"
+            android:enabled="false"
+            android:exported="true"
+            android:label="@string/dialer_label"
+            android:icon="@mipmap/ic_dialer">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity-alias>
+
+        <!-- Missed call count from Telecom to the default dialer. Only the count is read. -->
+        <receiver
+            android:name=".dialer.MissedCallReceiver"
+            android:enabled="${dialerComponentsEnabled}"
+            android:process=":dialer"
+            android:exported="true"
+            android:permission="android.permission.MODIFY_PHONE_STATE">
+            <intent-filter>
+                <action android:name="android.telecom.action.SHOW_MISSED_CALLS_NOTIFICATION" />
+            </intent-filter>
+        </receiver>
+
+        <!-- Call screening role holder: lets every call through without reading it. -->
+        <service
+            android:name=".dialer.AllowAllScreeningService"
+            android:enabled="${dialerComponentsEnabled}"
+            android:process=":dialer"
+            android:permission="android.permission.BIND_SCREENING_SERVICE"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.telecom.CallScreeningService" />
+            </intent-filter>
+        </service>
+
+        <activity
+            android:name=".incoming.IncomingPromptActivity"
+            android:label="@string/launcher_label"
+            android:process=":call"
+            android:taskAffinity="io.github.h4lovoid.dialcrypt.call"
+            android:exported="false"
+            android:excludeFromRecents="true"
+            android:launchMode="singleInstance"
+            android:showWhenLocked="true"
+            android:turnScreenOn="true"
+            android:screenOrientation="portrait"
+            android:configChanges="orientation|screenSize|smallestScreenSize|screenLayout|keyboard|keyboardHidden|navigation|uiMode|density|fontScale|locale|layoutDirection"
+            android:windowSoftInputMode="stateAlwaysHidden" />
+
+        <service
+            android:name=".call.SecureCallService"
+            android:process=":secure"
+            android:exported="false"
+            android:foregroundServiceType="phoneCall|microphone" />
+    </application>
+</manifest>

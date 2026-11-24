@@ -1,0 +1,16 @@
+[package]
+name = "aegiscall-memsec"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "Clean-room locked memory vault and volatile zeroization primitives for DialCrypt"
+
+[dependencies]
+blake3.workspace = true
+subtle.workspace = true
+zeroize.workspace = true
+thiserror.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true

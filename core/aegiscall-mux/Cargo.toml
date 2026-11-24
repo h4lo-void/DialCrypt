@@ -1,0 +1,13 @@
+[package]
+name = "aegiscall-mux"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "AegisMux 40ms/160ms superframe multiplexer with constant-rate indistinguishable Chaff cover traffic"
+
+[dependencies]
+aegiscall-memsec = { path = "../aegiscall-memsec" }
+aegiscall-crypto = { path = "../aegiscall-crypto" }
+blake3.workspace = true
+zeroize.workspace = true
