@@ -1,12 +1,16 @@
 <p align="center">
-  <img src="docs/images/banner.svg" width="900" alt="DialCrypt: end-to-end encrypted text carried as sound inside an ordinary phone call.">
+  <img src="docs/images/banner.svg" width="900" alt="DialCrypt: Post-Quantum Data over Voice — end-to-end encrypted messaging carried as sound inside an ordinary cellular voice call.">
 </p>
 
-<p align="center">
-  <strong>Encrypted text messages, carried as sound inside an ordinary phone call.</strong><br>
-  Two Google Pixels, one VoLTE or VoNR call. No <code>INTERNET</code> permission, no server, no account, no cloud.<br>
-  A hybrid <code>X25519 + ML-KEM-1024</code> handshake, identity keys that never leave the Titan M2, a voice-band modem written from scratch in Rust, and a root daemon that closes every network path except the call itself.
-</p>
+# DialCrypt — Post-Quantum Data over Voice
+
+**End-to-end encrypted messaging over cellular voice calls (VoLTE/VoNR) — no `INTERNET` permission, no server, no account, no cloud.**
+
+DialCrypt is an open-source **secure communication research** project exploring **encrypted messaging without Internet** by transmitting ciphertext as **data over voice** across an ordinary **cellular voice channel** between two rooted Google Pixel devices.
+
+It combines a custom Rust **voice-band modem** with **digital signal processing (DSP)** and **forward error correction (FEC)** designed for **AMR-WB / EVS codec** speech paths, **hybrid post-quantum cryptography** (`X25519 + ML-KEM-1024`), **hardware-backed cryptography** inside Titan M2 Android StrongBox, and **Android security hardening** through a root lockdown daemon and **Android telephony audio** process isolation.
+
+**Status:** Pre-alpha research prototype. Initial two-phone VoLTE testing completed; independent security review pending.
 
 <p align="center">
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-GPL--3.0--only-blue.svg" alt="License: GPL-3.0-only"></a>
@@ -58,13 +62,13 @@
 - [Built from scratch](#built-from-scratch)
 - [How a secure call works](#how-a-secure-call-works)
 - [The stack](#the-stack)
-- [The modem: data as voice](#the-modem-data-as-voice)
+- [The modem: data over voice](#the-modem-data-over-voice)
 - [Lockdown daemon](#lockdown-daemon)
 - [Process isolation](#process-isolation)
 - [Vault, duress and fingerprint](#vault-duress-and-fingerprint)
 - [Why DialCrypt](#why-dialcrypt)
 - [Threat model and limits](#threat-model-and-limits)
-- [Repository layout](#repository-layout) · [Build](#build) · [Status](#status) · [Documentation](#documentation)
+- [Repository layout](#repository-layout) · [Build](#build) · [Status](#status) · [Development notes](#development-notes) · [Documentation](#documentation)
 
 ## Built from scratch
 
@@ -146,9 +150,11 @@ Anything that fails along the way ends the call. There is no downgrade to an une
 | Tests | 431 Rust tests and 758 Android unit tests, plus fuzz tests for the handshake and pairing parsers (`core/aegiscall-crypto/tests/fuzz_*.rs`, `core/aegiscall-chat/tests/fuzz_hs_link.rs`). These counts are an inventory, not a pass report |
 | Planned | ML-DSA-65 hardware post-quantum identity signatures: the design is settled and nothing is implemented yet ([design](docs/design/pq-identity-signature.md)) |
 
-## The modem: data as voice
+## The modem: data over voice
 
-Phone networks are built to carry human speech, and they squeeze everything else. DialCrypt's modem (`core/aegiscall-modem`) is designed around that: it works in the voice band, with forward error correction, preamble synchronization, receiver-side channel compensation, selective-repeat ARQ and superframe multiplexing (`core/aegiscall-mux`). It has four gears ([`modulator.rs`](core/aegiscall-modem/src/modulator.rs)). Two run in calls today; two exist in the modem crate and the lab tool and are not negotiated in calls yet.
+Cellular voice channels and speech codecs (AMR-WB, EVS, AMR-NB) are built to carry human speech, and they compress or suppress non-speech signals. DialCrypt's Rust voice-band modem (`core/aegiscall-modem`) implements data over voice with digital signal processing (DSP) tailored to that path: 20 ms codec-aligned frames, constant-weight multi-tone codebooks, rate-1/2 K=7 forward error correction (FEC) with soft-decision Viterbi decoding, chirp preamble synchronization and CFO estimation, decision-directed receiver channel compensation, sample clock-skew tracking, selective-repeat ARQ, and constant-rate superframe multiplexing (`core/aegiscall-mux`). It has four gears ([`modulator.rs`](core/aegiscall-modem/src/modulator.rs)). Two run in calls today; two exist in the modem crate and the lab tool and are not negotiated in calls yet.
+
+For the full DSP specification, tone codebooks, FEC/interleaver layout, preamble CFO math, clock-skew tracker, and lab CLI commands, see [docs/design/modem.md](docs/design/modem.md).
 
 <p align="center">
   <img src="docs/images/modem-gears.svg" width="900" alt="Where each modem gear places its tones between 0 and 7 kHz, against the passbands of narrowband and wideband speech codecs.">
@@ -179,7 +185,7 @@ That is one path and one day. It shows why a robust gear exists, and it shows th
 
 ## Lockdown daemon
 
-While a secure session is live, a Rust daemon (`aegiscalld`) running as root locks the phone down. It is installed by a Magisk module ([build notes](magisk-module/BUILD.md)).
+For Android security hardening during a live secure session, a Rust daemon (`aegiscalld`) running as root locks the phone down. It is installed by a Magisk module ([build notes](magisk-module/BUILD.md)).
 
 <p align="center">
   <img src="docs/images/lockdown.svg" width="900" alt="During an armed session the daemon turns off the radios and USB data, keeps the baseband on LTE and NR, accepts only loopback, IMS signalling and learned media endpoints in the firewall, and journals every change so it can be undone.">
@@ -317,7 +323,7 @@ Done:
 
 Not done, or not verified:
 
-- Repeated VoLTE calls across carriers, and the bit error rate and gear of the VoLTE path. One quick-connect call on one carrier has worked end to end (see [The modem](#the-modem-data-as-voice)).
+- Repeated VoLTE calls across carriers, and the bit error rate and gear of the VoLTE path. One quick-connect call on one carrier has worked end to end (see [The modem](#the-modem-data-over-voice)).
 - A secure call with the daemon armed (`armed=1`), so that the lockdown runs during a real call.
 - Gradle does not build the Rust JNI library; run `tools/android-build/build.sh` first or the app shows Not connected.
 - The format of the Android system commands the daemon calls still needs confirming on a device.
@@ -328,10 +334,17 @@ Not done, or not verified:
 - No third-party security audit.
 - ML-DSA-65 identity signatures are designed but not implemented.
 
+## Development notes
+
+The initial DialCrypt prototype was developed in approximately two days as an independent secure communication research project exploring cellular voice channels, digital signal processing (DSP), Android telephony audio internals, and hardware-backed cryptography.
+
+The project is now focused on real-world cross-device VoLTE/VoNR validation, voice-band modem reliability, protocol and Android security hardening, and independent security review.
+
 ## Documentation
 
 | Document | What it covers |
 |---|---|
+| [Voice-band modem architecture](docs/design/modem.md) | Data-over-voice DSP design: four modem gears, FEC & interleaver, V-Chirp/vowel-glide preambles, adaptive equalization, clock-skew tracking, and lab measurements |
 | [Secure session v2](docs/design/secure-session-v2.md) | Handshake, trust model and lifecycle. Section 6 is the settled design |
 | [Post-quantum identity signature](docs/design/pq-identity-signature.md) | ML-DSA-65 hardware identity signature design (not implemented) |
 | [Incoming call v1](docs/design/incoming-call-v1.md) | Incoming-call handling, foregrounding during a call and safe exit |

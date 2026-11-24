@@ -1,12 +1,16 @@
 <p align="center">
-  <img src="docs/images/banner.svg" width="900" alt="DialCrypt：端到端加密的文字，以声音的形式承载在一通普通电话中。">
+  <img src="docs/images/banner.svg" width="900" alt="DialCrypt：后量子语音信道数据传输（Data over Voice）——端到端加密的文字，以声音的形式承载在一通普通蜂窝语音电话中。">
 </p>
 
-<p align="center">
-  <strong>加密文字消息，以声音的形式承载在一通普通电话中。</strong><br>
-  两部 Google Pixel，一通 VoLTE 或 VoNR 通话。没有 <code>INTERNET</code> 权限，没有服务器，没有账号，没有云。<br>
-  混合 <code>X25519 + ML-KEM-1024</code> 握手，永不离开 Titan M2 的身份密钥，用 Rust 从零写成的语音频带调制解调器，以及一个除通话本身之外关闭所有网络路径的 root 守护进程。
-</p>
+# DialCrypt — 后量子语音信道数据传输（Post-Quantum Data over Voice）
+
+**通过普通蜂窝语音通话（VoLTE/VoNR）进行的端到端加密文字通讯——无需 `INTERNET` 权限，无服务器，无账号，无云端。**
+
+DialCrypt 是一个开源的**安全通信研究（Secure Communication Research）**项目，探索**无需互联网的加密通讯（Encrypted Messaging without Internet）**：将密文以**语音承载数据（Data over Voice）**的方式，经由两部已获取 root 权限的 Google Pixel 之间的普通**蜂窝语音信道**完成传输。
+
+它结合了从零用 Rust 编写的**语音频带调制解调器（Voice-Band Modem）**、面向 **AMR-WB / EVS 语音编解码器**的**数字信号处理（DSP）**与**前向纠错（FEC）**、**混合后量子密码学**（`X25519 + ML-KEM-1024`）、基于 Titan M2 Android StrongBox 的**硬件级密钥保护**，以及通过 root 封锁守护进程与 **Android 电话音频**进程隔离实现的 **Android 系统安全加固**。
+
+**状态：** Pre-alpha 研究原型。已完成初步双机 VoLTE 实测，独立安全审计尚待进行。
 
 <p align="center">
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-GPL--3.0--only-blue.svg" alt="许可证：GPL-3.0-only"></a>
@@ -64,7 +68,7 @@
 - [保险库、紧急 PIN 码与指纹](#保险库紧急-pin-码与指纹)
 - [为什么选择 DialCrypt](#为什么选择-dialcrypt)
 - [威胁模型与局限](#威胁模型与局限)
-- [仓库结构](#仓库结构) · [构建](#构建) · [当前状态](#当前状态) · [文档](#文档)
+- [仓库结构](#仓库结构) · [构建](#构建) · [当前状态](#当前状态) · [开发说明](#开发说明) · [文档](#文档)
 
 ## 从零自研
 
@@ -148,7 +152,9 @@ Android 会把空闲内存压缩进 `zram`，Java 字符串也会在垃圾回收
 
 ## 调制解调器：把数据当作语音
 
-电话网络是为承载人类语音而建的，它们会压缩其余一切。DialCrypt 的调制解调器（`core/aegiscall-modem`）正是围绕这一点设计的：它工作在语音频带，带有前向纠错、前导码同步、接收端信道补偿、选择性重传 ARQ 和超帧复用（`core/aegiscall-mux`）。它有四个档位（[`modulator.rs`](core/aegiscall-modem/src/modulator.rs)）。其中两个目前在通话中使用；另外两个存在于调制解调器 crate 和实验室工具中，尚未在通话中协商使用。
+蜂窝语音信道与语音编解码器（AMR-WB、EVS、AMR-NB）是为承载人类语音而建的，它们会压缩或抑制非语音信号。DialCrypt 的 Rust 语音频带调制解调器（`core/aegiscall-modem`）专门围绕语音承载数据（Data over Voice）与数字信号处理（DSP）而设计：20 ms 编解码器帧对齐、定重多音码本、码率 1/2 K=7 前向纠错（FEC）与软判决 Viterbi 解码、扫频前导码同步与载波频偏（CFO）估计、判决引导的接收端信道补偿、采样时钟漂移跟踪、选择性重传 ARQ，以及恒定速率超帧复用（`core/aegiscall-mux`）。它有四个档位（[`modulator.rs`](core/aegiscall-modem/src/modulator.rs)）。其中两个目前在通话中使用；另外两个存在于调制解调器 crate 和实验室工具中，尚未在通话中协商使用。
+
+完整的 DSP 参数、码本设计、FEC 与交织器结构、前导码 CFO 算法、时钟漂移跟踪以及实验室工具命令，请见独立技术文档 [docs/design/modem.md](docs/design/modem.md)（英文）。
 
 <p align="center">
   <img src="docs/images/modem-gears.svg" width="900" alt="每个调制解调器档位的音调在 0 至 7 kHz 之间的位置，对照窄带与宽带语音编解码器的通带。">
@@ -328,10 +334,17 @@ AEGIS_FIELD_TEST=1 bash tools/android-build/build.sh
 - 没有第三方安全审计。
 - ML-DSA-65 身份签名已有设计但尚未实现。
 
+## 开发说明
+
+DialCrypt 的首个研究原型历时约两天完成，作为一项独立的安全通信研究项目，探索蜂窝语音信道、数字信号处理（DSP）、Android 电话音频底层机制以及硬件级密码学。
+
+目前项目重心已转向真实跨设备与跨运营商的 VoLTE/VoNR 验证、语音频带调制解调器稳定性优化、协议与 Android 系统安全加固，以及独立安全审计。
+
 ## 文档
 
 | 文档 | 内容 |
 |---|---|
+| [语音频带调制解调器架构（英文）](docs/design/modem.md) | Data over Voice DSP 设计：四档调制解调器、FEC 与交织器、V-Chirp / 元音滑音前导码、自适应均衡、时钟漂移跟踪与实测记录 |
 | [安全会话 v2](docs/design/secure-session-v2.md) | 握手、信任模型和生命周期。第 6 节是已定稿的设计 |
 | [后量子身份签名](docs/design/pq-identity-signature.md) | ML-DSA-65 硬件身份签名设计（尚未实现） |
 | [来电 v1](docs/design/incoming-call-v1.md) | 来电处理、通话期间的前台显示和安全退出 |
