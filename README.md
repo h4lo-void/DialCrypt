@@ -57,6 +57,14 @@ It combines a custom Rust **voice-band modem** with **digital signal processing 
 
 <p align="center"><sub>Screenshots use test data. Left to right: contacts, the five-word voice check, a verified chat.</sub></p>
 
+<p align="center">
+  <a href="https://www.youtube.com/watch?v=YZn9QQuQKfE">
+    <img src="https://img.youtube.com/vi/YZn9QQuQKfE/sddefault.jpg" width="640" alt="DialCrypt – Encrypted Messaging over VoLTE | Rust Modem & Post-Quantum Cryptography">
+  </a>
+</p>
+
+<p align="center"><sub>▶ <a href="https://www.youtube.com/watch?v=YZn9QQuQKfE">Watch demo on YouTube: DialCrypt – Encrypted Messaging over VoLTE | Rust Modem &amp; Post-Quantum Cryptography</a></sub></p>
+
 ## Contents
 
 - [Built from scratch](#built-from-scratch)

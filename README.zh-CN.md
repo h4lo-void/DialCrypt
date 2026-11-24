@@ -57,6 +57,14 @@ DialCrypt 是一个开源的**安全通信研究（Secure Communication Research
 
 <p align="center"><sub>截图使用测试数据。从左到右：联系人、五词语音核对、已验证的聊天。</sub></p>
 
+<p align="center">
+  <a href="https://www.youtube.com/watch?v=YZn9QQuQKfE">
+    <img src="https://img.youtube.com/vi/YZn9QQuQKfE/sddefault.jpg" width="640" alt="DialCrypt – Encrypted Messaging over VoLTE | Rust Modem & Post-Quantum Cryptography">
+  </a>
+</p>
+
+<p align="center"><sub>▶ <a href="https://www.youtube.com/watch?v=YZn9QQuQKfE">在 YouTube 上观看演示：DialCrypt – Encrypted Messaging over VoLTE | Rust Modem &amp; Post-Quantum Cryptography</a></sub></p>
+
 ## 目录
 
 - [从零自研](#从零自研)
