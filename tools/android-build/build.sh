@@ -9,6 +9,8 @@
 #   out/module/                  the unpacked module tree
 #   out/app_cert_sha256.txt      SHA-256 of the APK signing certificate (for policy.conf)
 #
+# The module carries the same hash as app_cert_sha256; its installer pins it in policy.conf.
+#
 # With AEGIS_TEST_NO_PIN=1 or AEGIS_FIELD_TEST=1 the script builds the fieldTest variant instead
 # of release and names the zip out/aegischat-module-FIELDTEST.zip. Never install it for real use.
 #
@@ -116,8 +118,8 @@ bash ./gradlew --console=plain "$GRADLE_TASK"
 APK=$ROOT/$APK_REL
 [ -f "$APK" ] || die "signed APK not found at $APK"
 
-# --- e. module --------------------------------------------------------------
-step "e. module zip"
+# --- e. module tree ---------------------------------------------------------
+step "e. module tree"
 OUT=$ROOT/out
 MODULE=$OUT/module
 ZIP=$OUT/$ZIP_NAME
@@ -133,7 +135,6 @@ install -m 0644 "$APK" "$MODULE/system/priv-app/DialCrypt/DialCrypt.apk"
 if [ -f "$MODULE/META-INF/com/google/android/update-binary" ]; then
   chmod 0755 "$MODULE/META-INF/com/google/android/update-binary"
 fi
-(cd "$MODULE" && zip -q -X -r "$ZIP" .)
 MODULE_APK=$MODULE/system/priv-app/DialCrypt/DialCrypt.apk
 
 # --- f. signing certificate hash --------------------------------------------
@@ -144,6 +145,12 @@ CERT_SHA=$(awk '/certificate SHA-256 digest:/ { print $NF; exit }' "$OUT/.apksig
 rm -f "$OUT/.apksigner-certs.txt"
 printf '%s' "$CERT_SHA" | grep -Eq '^[0-9a-f]{64}$' || die "could not read a 64-hex certificate SHA-256 from apksigner"
 printf '%s\n' "$CERT_SHA" > "$OUT/app_cert_sha256.txt"
+# customize.sh sets this as app_cert_sha256 in policy.conf when the module is installed.
+printf '%s\n' "$CERT_SHA" > "$MODULE/app_cert_sha256"
+
+# --- g. module zip ----------------------------------------------------------
+step "g. module zip"
+(cd "$MODULE" && zip -q -X -r "$ZIP" .)
 
 if [ "$FIELD_TEST" = "1" ]; then
   printf '\nDONE: FIELD TEST BUILD (test switches on, never install on a phone in real use)\n'

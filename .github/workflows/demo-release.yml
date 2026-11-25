@@ -127,11 +127,7 @@ jobs:
             echo
             echo "**Requirements:** the same as the normal build: a rooted Pixel with Titan M2 and Magisk, on both phones. It does not work on an ordinary phone, because the secure call path needs privileged call-audio permissions that only the module grants."
             echo
-            echo "**Install:** flash aegischat-module-FIELDTEST.zip in Magisk on both phones and reboot. Then set this line in /data/adb/aegischat/policy.conf on each phone, as magisk-module/BUILD.md describes:"
-            echo
-            echo "~~~"
-            echo "app_cert_sha256=$CERT_SHA"
-            echo "~~~"
+            echo "**Install:** flash aegischat-module-FIELDTEST.zip in Magisk on both phones and reboot. The installer sets app_cert_sha256 in /data/adb/aegischat/policy.conf by itself, so nothing has to be typed in. App signing certificate SHA-256: $CERT_SHA"
             echo
             echo "$KEY_NOTE"
             echo

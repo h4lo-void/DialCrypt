@@ -206,7 +206,7 @@ For Android security hardening during a live secure session, a Rust daemon (`aeg
 | 1 | On by default | Writes a restore journal first, then turns off Wi-Fi, mobile data, Bluetooth, NFC, UWB and background scanning, sets USB to charge only, leaves the baseband on LTE and NR only, and loads firewall rules that drop everything except loopback, IPv6 neighbour discovery, IMS traffic to the P-CSCF and up to four learned media endpoints |
 | 2 | Off by default, not verified on a device | Suspends other apps, third-party input methods and accessibility services, and clears memory. Enabled with `dedicated_mode=1` |
 
-The daemon starts in dry-run mode. It changes the system only after `armed=1` is set in `/data/adb/aegischat/policy.conf`, and it refuses every connection until the app's signing certificate hash is pinned there. When the session ends, when the daemon dies, or at boot, the system is restored from the journal; the Magisk module ships a boot-time restore script for that last case.
+The daemon starts in dry-run mode. It changes the system only after `armed=1` is set in `/data/adb/aegischat/policy.conf`, and it refuses every connection until the app's signing certificate hash is pinned there; the module installer pins the hash of the app it ships. When the session ends, when the daemon dies, or at boot, the system is restored from the journal; the Magisk module ships a boot-time restore script for that last case.
 
 ## Process isolation
 

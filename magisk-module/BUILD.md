@@ -30,14 +30,18 @@ module tree, then zip the module.
 ## policy.conf (required)
 
 `/data/adb/aegischat/policy.conf` is created at install time with `armed=0`
-and `dedicated_mode=0` (dry run). One key must be added by hand:
+and `dedicated_mode=0` (dry run). The installer also pins the signing
+certificate of the bundled app:
 
 ```
 app_cert_sha256=<64 hex digits, SHA-256 of the App's signing certificate>
 ```
 
-Use the "Signer #1 certificate SHA-256 digest" printed by
-`apksigner verify --print-certs <app.apk>`. The daemon compares this value
+It reads the value from the file `app_cert_sha256` at the module root, which
+`tools/android-build/build.sh` writes, and replaces any earlier value, so a
+module signed with another key needs no edit by hand. A module packed without
+that file leaves the key as it is; then set it to the "Signer #1 certificate
+SHA-256 digest" printed by `apksigner verify --print-certs <app.apk>`. The daemon compares this value
 with the signing record the package manager keeps for
 `io.github.h4lovoid.dialcrypt`. While the key is missing or does not match,
 the daemon refuses every connection (FAIL code 206, 205 or 207). That is the
@@ -115,17 +119,17 @@ release APK.
 Artifacts, relative to the repository root:
 
 - `app/build/outputs/apk/pixelTitan/release/app-pixelTitan-release.apk`: signed APK
-- `out/module/`: unpacked module (this directory plus `system/bin/aegiscalld` and
-  `system/priv-app/DialCrypt/DialCrypt.apk`; this file is left out)
+- `out/module/`: unpacked module (this directory plus `system/bin/aegiscalld`,
+  `system/priv-app/DialCrypt/DialCrypt.apk` and `app_cert_sha256`; this file is left out)
 - `out/aegischat-module.zip`: the module, `module.prop` at the zip root; install it
   from the KernelSU manager or a root shell
 - `out/app_cert_sha256.txt`: 64 lowercase hex digits, the SHA-256 of the APK
   signing certificate
 
 `app_cert_sha256` in `policy.conf` (see above) is the content of
-`out/app_cert_sha256.txt`; the script also prints it at the end. The value
-changes only if `~/aegis-build/keys/test-release.jks` is replaced. Add it to
-`/data/adb/aegischat/policy.conf` on the phone as `app_cert_sha256=<that value>`.
+`out/app_cert_sha256.txt`; the script also prints it at the end and puts it in
+the module, whose installer pins it. The value changes only if
+`~/aegis-build/keys/test-release.jks` is replaced.
 
 ## Field-test builds
 
