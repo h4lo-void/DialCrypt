@@ -15,11 +15,11 @@ use std::collections::BTreeMap;
 use std::str::FromStr;
 use std::sync::OnceLock;
 use std::time::Duration;
-use x509_cert::builder::{Builder, CertificateBuilder, Profile};
+use x509_cert::builder::{Builder, CertificateBuilder};
 use x509_cert::der::oid::{AssociatedOid, ObjectIdentifier};
 use x509_cert::der::{Decode, Encode, Length, Writer};
 use x509_cert::ext::pkix::BasicConstraints;
-use x509_cert::ext::{AsExtension, Extension};
+use x509_cert::ext::{Criticality, Extension};
 use x509_cert::name::Name;
 use x509_cert::serial_number::SerialNumber;
 use x509_cert::spki::{EncodePublicKey, SubjectPublicKeyInfoOwned};
@@ -143,8 +143,8 @@ impl Encode for KdExt {
     }
 }
 
-impl AsExtension for KdExt {
-    fn critical(&self, _: &Name, _: &[Extension]) -> bool {
+impl Criticality for KdExt {
+    fn criticality(&self, _: &Name, _: &[Extension]) -> bool {
         false
     }
 }
@@ -156,12 +156,10 @@ fn spki_of(k: &SigningKey) -> SubjectPublicKeyInfoOwned {
 fn issue(signer: &SigningKey, profile: Profile, serial: u8, subject: &str, spki: SubjectPublicKeyInfoOwned, kd: Option<&KdExt>) -> Vec<u8> {
     let manual = matches!(profile, Profile::Manual { .. });
     let mut b = CertificateBuilder::new(
-        profile,
+        FixtureProfile { kind: profile, subject: Name::from_str(subject).unwrap() },
         SerialNumber::new(&[0x01, serial]).unwrap(),
         Validity::from_now(Duration::from_secs(3600)).unwrap(),
-        Name::from_str(subject).unwrap(),
         spki,
-        signer,
     )
     .unwrap();
     if manual {
@@ -170,7 +168,7 @@ fn issue(signer: &SigningKey, profile: Profile, serial: u8, subject: &str, spki:
     if let Some(e) = kd {
         b.add_extension(e).unwrap();
     }
-    b.build::<p256::ecdsa::DerSignature>().unwrap().to_der().unwrap()
+    b.build::<_, p256::ecdsa::DerSignature>(signer).unwrap().to_der().unwrap()
 }
 
 struct Pki {
@@ -188,9 +186,9 @@ fn push_rec(out: &mut Vec<u8>, t: u8, v: &[u8]) {
 fn pki() -> &'static Pki {
     static P: OnceLock<Pki> = OnceLock::new();
     P.get_or_init(|| {
-        let root_key = SigningKey::random(&mut OsRng);
+        let root_key = <SigningKey as p256::elliptic_curve::Generate>::generate();
         let root = issue(&root_key, Profile::Root, 1, ROOT_CN, spki_of(&root_key), None);
-        let inter_key = SigningKey::random(&mut OsRng);
+        let inter_key = <SigningKey as p256::elliptic_curve::Generate>::generate();
         let profile = Profile::SubCA { issuer: Name::from_str(ROOT_CN).unwrap(), path_len_constraint: None };
         let inter_der = issue(&root_key, profile, 10, INTER_CN, spki_of(&inter_key), None);
         let mut trust_tlv = vec![1u8];
@@ -206,7 +204,7 @@ pub(crate) fn trust_tlv() -> &'static [u8] {
 }
 
 pub(crate) fn hmac(key: &[u8; 32], msg: &[u8]) -> [u8; 32] {
-    let mut m = <Hmac<Sha256> as Mac>::new_from_slice(key).unwrap();
+    let mut m = <Hmac<Sha256> as hmac::KeyInit>::new_from_slice(key).unwrap();
     m.update(msg);
     let mut out = [0u8; 32];
     out.copy_from_slice(&m.finalize().into_bytes());
@@ -230,7 +228,7 @@ pub(crate) struct Device {
 
 impl Device {
     pub fn new() -> Self {
-        let sk = SigningKey::random(&mut OsRng);
+        let sk = <SigningKey as p256::elliptic_curve::Generate>::generate();
         let chain_tlv = chain_for(&sk, 99);
         let spki = sk.verifying_key().to_public_key_der().unwrap().as_bytes().to_vec();
         Self { sk, spki, chain_tlv, tickets: BTreeMap::new(), blob: Vec::new() }
@@ -238,7 +236,7 @@ impl Device {
 
     pub fn pub33(&self) -> [u8; 33] {
         let mut out = [0u8; 33];
-        out.copy_from_slice(self.sk.verifying_key().to_encoded_point(true).as_bytes());
+        out.copy_from_slice(self.sk.verifying_key().to_sec1_point(true).as_bytes());
         out
     }
 
@@ -326,9 +324,9 @@ pub(crate) fn chain_for(sk: &SigningKey, serial: u8) -> Vec<u8> {
 
 /// A pairing code of somebody who is not in the test: (code, pub33).
 pub(crate) fn synthetic_code() -> (String, [u8; 33]) {
-    let sk = SigningKey::random(&mut OsRng);
+    let sk = <SigningKey as p256::elliptic_curve::Generate>::generate();
     let mut pub33 = [0u8; 33];
-    pub33.copy_from_slice(sk.verifying_key().to_encoded_point(true).as_bytes());
+    pub33.copy_from_slice(sk.verifying_key().to_sec1_point(true).as_bytes());
     let mut seed = [0u8; 32];
     OsRng.fill_bytes(&mut seed);
     let xpub = aegiscall_crypto::PairingSecret::from_seed(&seed).public();
@@ -540,3 +538,63 @@ fn wrapped_ticket_rotation_works_end_to_end() {
 
     assert_eq!(b.app_close(app), OK);
 }
+
+// x509-cert 0.3 replaced the builder's `Profile` enum with the `BuilderProfile` trait. This keeps
+// the 0.2 Root / SubCA / Manual variants these fixtures use and emits the same extensions, in the
+// same order, as x509-cert 0.2 did.
+mod fixture_profile {
+    use x509_cert::builder::profile::BuilderProfile;
+    use x509_cert::certificate::TbsCertificate;
+    use x509_cert::ext::pkix::{AuthorityKeyIdentifier, BasicConstraints, KeyUsage, KeyUsages, SubjectKeyIdentifier};
+    use x509_cert::ext::{Extension, ToExtension};
+    use x509_cert::name::Name;
+    use x509_cert::spki::SubjectPublicKeyInfoRef;
+
+    pub(super) enum Profile {
+        Root,
+        SubCA { issuer: Name, path_len_constraint: Option<u8> },
+        Manual { issuer: Option<Name> },
+    }
+
+    pub(super) struct FixtureProfile {
+        pub(super) kind: Profile,
+        pub(super) subject: Name,
+    }
+
+    impl BuilderProfile for FixtureProfile {
+        fn get_issuer(&self, subject: &Name) -> Name {
+            match &self.kind {
+                Profile::Root => subject.clone(),
+                Profile::SubCA { issuer, .. } => issuer.clone(),
+                Profile::Manual { issuer } => issuer.as_ref().unwrap_or(subject).clone(),
+            }
+        }
+
+        fn get_subject(&self) -> Name {
+            self.subject.clone()
+        }
+
+        fn build_extensions(
+            &self,
+            spk: SubjectPublicKeyInfoRef<'_>,
+            issuer_spk: SubjectPublicKeyInfoRef<'_>,
+            tbs: &TbsCertificate,
+        ) -> x509_cert::builder::Result<Vec<Extension>> {
+            let path_len_constraint = match &self.kind {
+                Profile::Manual { .. } => return Ok(Vec::new()),
+                Profile::Root => None,
+                Profile::SubCA { path_len_constraint, .. } => *path_len_constraint,
+            };
+            let subject = tbs.subject();
+            let mut exts = Vec::new();
+            exts.push(SubjectKeyIdentifier::try_from(spk)?.to_extension(subject, &exts)?);
+            if !matches!(self.kind, Profile::Root) {
+                exts.push(AuthorityKeyIdentifier::try_from(issuer_spk)?.to_extension(subject, &exts)?);
+            }
+            exts.push(BasicConstraints { ca: true, path_len_constraint }.to_extension(subject, &exts)?);
+            exts.push(KeyUsage(KeyUsages::KeyCertSign | KeyUsages::CRLSign).to_extension(subject, &exts)?);
+            Ok(exts)
+        }
+    }
+}
+use fixture_profile::{FixtureProfile, Profile};

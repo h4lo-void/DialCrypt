@@ -44,8 +44,8 @@ fn attempt(ks: &mut SimKeystore, blob: &[u8], pin: &[u8]) -> UnlockOutcome {
 }
 
 fn pub33() -> [u8; 33] {
-    let sk = p256::SecretKey::random(&mut OsRng);
-    let enc = p256::elliptic_curve::sec1::ToEncodedPoint::to_encoded_point(&sk.public_key(), true);
+    let sk = <p256::SecretKey as p256::elliptic_curve::Generate>::generate();
+    let enc = p256::elliptic_curve::sec1::ToSec1Point::to_sec1_point(&sk.public_key(), true);
     <[u8; 33]>::try_from(enc.as_bytes()).unwrap()
 }
 

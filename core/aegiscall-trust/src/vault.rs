@@ -152,7 +152,7 @@ fn random_key(rng: &mut impl CryptoRngCore) -> SecretKey32 {
 
 /// HMAC-SHA256. The tag temporary is wiped once it is copied into the zeroizing wrapper.
 fn hmac32(key: &[u8], parts: &[&[u8]]) -> Result<SecretKey32, TrustError> {
-    let mut mac = <HmacSha256 as Mac>::new_from_slice(key).map_err(|_| TrustError::Crypto)?;
+    let mut mac = <HmacSha256 as hmac::KeyInit>::new_from_slice(key).map_err(|_| TrustError::Crypto)?;
     for p in parts {
         mac.update(p);
     }

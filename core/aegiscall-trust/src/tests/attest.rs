@@ -5,10 +5,10 @@ use rand_core::OsRng;
 use std::str::FromStr;
 use std::sync::OnceLock;
 use std::time::Duration;
-use x509_cert::builder::{Builder, CertificateBuilder, Profile};
+use x509_cert::builder::{Builder, CertificateBuilder};
 use x509_cert::der::oid::AssociatedOid;
 use x509_cert::der::{Length, Writer};
-use x509_cert::ext::{AsExtension, Extension};
+use x509_cert::ext::{Criticality, Extension};
 use x509_cert::name::Name;
 use x509_cert::serial_number::SerialNumber;
 use x509_cert::spki::{DynSignatureAlgorithmIdentifier, EncodePublicKey, SignatureBitStringEncoding};
@@ -175,8 +175,8 @@ impl Encode for KdExt {
         w.write(&self.0)
     }
 }
-impl AsExtension for KdExt {
-    fn critical(&self, _: &Name, _: &[Extension]) -> bool {
+impl Criticality for KdExt {
+    fn criticality(&self, _: &Name, _: &[Extension]) -> bool {
         false
     }
 }
@@ -191,12 +191,10 @@ where
     // certificates a non-CA BasicConstraints so every fixture stays v3 like real chains.
     let manual = matches!(profile, Profile::Manual { .. });
     let mut b = CertificateBuilder::new(
-        profile,
+        FixtureProfile { kind: profile, subject: Name::from_str(subject).unwrap() },
         SerialNumber::new(&[0x01, serial]).unwrap(),
         Validity::from_now(Duration::from_secs(3600)).unwrap(),
-        Name::from_str(subject).unwrap(),
         spki,
-        signer,
     )
     .unwrap();
     if manual {
@@ -209,7 +207,7 @@ where
     for e in exts {
         b.add_extension(e).unwrap();
     }
-    b.build::<Sig>().unwrap().to_der().unwrap()
+    b.build::<_, Sig>(signer).unwrap().to_der().unwrap()
 }
 
 enum TestKey {
@@ -218,14 +216,14 @@ enum TestKey {
     Rsa(Box<rsa::pkcs1v15::SigningKey<Sha256>>),
 }
 
-fn rsa_key() -> rsa::RsaPrivateKey {
-    static KEY: OnceLock<rsa::RsaPrivateKey> = OnceLock::new();
-    KEY.get_or_init(|| rsa::RsaPrivateKey::new(&mut OsRng, 2048).unwrap()).clone()
+fn rsa_key() -> rsa::PrivateKey {
+    static KEY: OnceLock<rsa::PrivateKey> = OnceLock::new();
+    KEY.get_or_init(|| rsa::PrivateKey::new(&mut crate::wrap::RsaRng(&mut OsRng), 2048).unwrap()).clone()
 }
 
 impl TestKey {
     fn p256() -> Self {
-        TestKey::P256(p256::ecdsa::SigningKey::random(&mut OsRng))
+        TestKey::P256(<p256::ecdsa::SigningKey as p256::elliptic_curve::Generate>::generate())
     }
     fn spki(&self) -> SubjectPublicKeyInfoOwned {
         let der = match self {
@@ -278,7 +276,7 @@ struct Built {
 fn leaf_parts() -> (SubjectPublicKeyInfoOwned, [u8; 33]) {
     let k = TestKey::p256();
     let pub33 = match &k {
-        TestKey::P256(sk) => <[u8; 33]>::try_from(sk.verifying_key().to_encoded_point(true).as_bytes()).unwrap(),
+        TestKey::P256(sk) => <[u8; 33]>::try_from(sk.verifying_key().to_sec1_point(true).as_bytes()).unwrap(),
         _ => unreachable!(),
     };
     (k.spki(), pub33)
@@ -348,7 +346,7 @@ fn valid_chain_is_accepted() {
 fn rsa_and_p384_issuers_are_accepted() {
     let root_key = TestKey::Rsa(Box::new(rsa::pkcs1v15::SigningKey::<Sha256>::new(rsa_key())));
     let root = root_key.issue(Profile::Root, 1, ROOT_CN, root_key.spki(), &[]);
-    let k384 = TestKey::P384(p384::ecdsa::SigningKey::random(&mut OsRng));
+    let k384 = TestKey::P384(<p384::ecdsa::SigningKey as p256::elliptic_curve::Generate>::generate());
     let i1 = root_key.issue(Profile::SubCA { issuer: name(ROOT_CN), path_len_constraint: None }, 2, "CN=P384 CA", k384.spki(), &[]);
     let k256 = TestKey::p256();
     let i2 = k384.issue(Profile::SubCA { issuer: name("CN=P384 CA"), path_len_constraint: None }, 3, "CN=P256 CA", k256.spki(), &[]);
@@ -659,3 +657,63 @@ fn trust_config_from_tlv() {
     assert_eq!(TrustConfig::from_tlv(&[vec![2], good[1..].to_vec()].concat()).err(), Some(bad));
     assert_eq!(TrustConfig::from_tlv(&[vec![1], rec(1, &[0x30, 0x00]), rec(4, &SIGNER), rec(5, &[0, 3, 0x16, 0x01])].concat()).err(), Some(bad));
 }
+
+// x509-cert 0.3 replaced the builder's `Profile` enum with the `BuilderProfile` trait. This keeps
+// the 0.2 Root / SubCA / Manual variants these fixtures use and emits the same extensions, in the
+// same order, as x509-cert 0.2 did.
+mod fixture_profile {
+    use x509_cert::builder::profile::BuilderProfile;
+    use x509_cert::certificate::TbsCertificate;
+    use x509_cert::ext::pkix::{AuthorityKeyIdentifier, BasicConstraints, KeyUsage, KeyUsages, SubjectKeyIdentifier};
+    use x509_cert::ext::{Extension, ToExtension};
+    use x509_cert::name::Name;
+    use x509_cert::spki::SubjectPublicKeyInfoRef;
+
+    pub(super) enum Profile {
+        Root,
+        SubCA { issuer: Name, path_len_constraint: Option<u8> },
+        Manual { issuer: Option<Name> },
+    }
+
+    pub(super) struct FixtureProfile {
+        pub(super) kind: Profile,
+        pub(super) subject: Name,
+    }
+
+    impl BuilderProfile for FixtureProfile {
+        fn get_issuer(&self, subject: &Name) -> Name {
+            match &self.kind {
+                Profile::Root => subject.clone(),
+                Profile::SubCA { issuer, .. } => issuer.clone(),
+                Profile::Manual { issuer } => issuer.as_ref().unwrap_or(subject).clone(),
+            }
+        }
+
+        fn get_subject(&self) -> Name {
+            self.subject.clone()
+        }
+
+        fn build_extensions(
+            &self,
+            spk: SubjectPublicKeyInfoRef<'_>,
+            issuer_spk: SubjectPublicKeyInfoRef<'_>,
+            tbs: &TbsCertificate,
+        ) -> x509_cert::builder::Result<Vec<Extension>> {
+            let path_len_constraint = match &self.kind {
+                Profile::Manual { .. } => return Ok(Vec::new()),
+                Profile::Root => None,
+                Profile::SubCA { path_len_constraint, .. } => *path_len_constraint,
+            };
+            let subject = tbs.subject();
+            let mut exts = Vec::new();
+            exts.push(SubjectKeyIdentifier::try_from(spk)?.to_extension(subject, &exts)?);
+            if !matches!(self.kind, Profile::Root) {
+                exts.push(AuthorityKeyIdentifier::try_from(issuer_spk)?.to_extension(subject, &exts)?);
+            }
+            exts.push(BasicConstraints { ca: true, path_len_constraint }.to_extension(subject, &exts)?);
+            exts.push(KeyUsage(KeyUsages::KeyCertSign | KeyUsages::CRLSign).to_extension(subject, &exts)?);
+            Ok(exts)
+        }
+    }
+}
+use fixture_profile::{FixtureProfile, Profile};

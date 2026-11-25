@@ -10,7 +10,7 @@ use aegiscall_memsec::SecretKey32;
 use rand_core::CryptoRngCore;
 use rsa::pkcs1::DecodeRsaPublicKey;
 use rsa::traits::PublicKeyParts;
-use rsa::{Oaep, RsaPublicKey};
+use rsa::{Oaep, PublicKey as RsaPublicKey};
 use sha1::Sha1;
 use sha2::Sha256;
 use x509_cert::der::oid::ObjectIdentifier;
@@ -19,6 +19,29 @@ use x509_cert::spki::SubjectPublicKeyInfoOwned;
 use zeroize::{Zeroize, Zeroizing};
 
 const OID_RSA_ENCRYPTION: ObjectIdentifier = ObjectIdentifier::new_unwrap("1.2.840.113549.1.1.1");
+
+/// Presents the caller's rand_core 0.6 RNG through the rand_core 0.10 traits rsa 0.10 expects.
+/// Every call goes straight to the wrapped RNG; nothing is buffered here.
+pub(crate) struct RsaRng<'a, R: CryptoRngCore + ?Sized>(pub(crate) &'a mut R);
+
+impl<R: CryptoRngCore + ?Sized> rsa::rand_core::TryRng for RsaRng<'_, R> {
+    type Error = core::convert::Infallible;
+
+    fn try_next_u32(&mut self) -> Result<u32, Self::Error> {
+        Ok(self.0.next_u32())
+    }
+
+    fn try_next_u64(&mut self) -> Result<u64, Self::Error> {
+        Ok(self.0.next_u64())
+    }
+
+    fn try_fill_bytes(&mut self, dst: &mut [u8]) -> Result<(), Self::Error> {
+        self.0.fill_bytes(dst);
+        Ok(())
+    }
+}
+
+impl<R: CryptoRngCore + ?Sized> rsa::rand_core::TryCryptoRng for RsaRng<'_, R> {}
 
 // ---------------------------------------------------------------------------
 // Self-contained FIPS-197 AES-256 + NIST SP 800-38D GCM (encrypts 32-byte key)
@@ -285,7 +308,9 @@ pub fn parse_wrapping_public_key(spki_der: &[u8]) -> Result<RsaPublicKey, TrustE
     }
     let bytes = spki.subject_public_key.as_bytes().ok_or(TrustError::ConfigMalformed)?;
     let pub_key = RsaPublicKey::from_pkcs1_der(bytes).map_err(|_| TrustError::ConfigMalformed)?;
-    if pub_key.n().bits() < 2048 {
+    // 2048..=4096 bits: rsa 0.9 rejected larger moduli while parsing, rsa 0.10 accepts up to 8192.
+    let bits = pub_key.n().bit_width();
+    if !(2048..=4096).contains(&bits) {
         return Err(TrustError::ConfigMalformed);
     }
     Ok(pub_key)
@@ -303,9 +328,9 @@ pub fn wrap_ticket_for_strongbox(
     rng.fill_bytes(&mut iv);
 
     // Android KeyMintRSA/ECB/OAEPPadding for WrappedKeyEntry uses SHA-256 digest + MGF1-SHA1
-    let padding = Oaep::new_with_mgf_hash::<Sha256, Sha1>();
+    let padding = Oaep::<Sha256, Sha1>::new_with_mgf_hash();
     let enc_transport = wrapping_pub
-        .encrypt(rng, padding, transport_key.as_slice())
+        .encrypt(&mut RsaRng(rng), padding, transport_key.as_slice())
         .map_err(|_| TrustError::Crypto)?;
 
     let kd_der = build_ticket_key_description_der();
@@ -328,7 +353,7 @@ pub fn wrap_ticket_for_strongbox(
 mod tests {
     use super::*;
     use rand_core::OsRng;
-    use rsa::RsaPrivateKey;
+    use rsa::PrivateKey as RsaPrivateKey;
     use x509_cert::der::Encode;
     use x509_cert::spki::EncodePublicKey;
 
@@ -373,7 +398,7 @@ mod tests {
 
     #[test]
     fn secure_key_wrapper_roundtrips_under_rsa2048_oaep_sha256_mgf1_sha1() {
-        let sk = RsaPrivateKey::new(&mut OsRng, 2048).unwrap();
+        let sk = RsaPrivateKey::new(&mut RsaRng(&mut OsRng), 2048).unwrap();
         let pk = RsaPublicKey::from(&sk);
         let spki = pk.to_public_key_der().unwrap();
         let parsed_pk = parse_wrapping_public_key(spki.as_bytes()).unwrap();

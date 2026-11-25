@@ -22,7 +22,7 @@ impl Ks {
     }
     fn use_t(&mut self, id: u32, input: &[u8; 32]) -> Option<[u8; 32]> {
         let k = self.0.remove(&id)?;
-        let mut m = <Hmac<Sha256> as Mac>::new_from_slice(&k).unwrap();
+        let mut m = <Hmac<Sha256> as hmac::KeyInit>::new_from_slice(&k).unwrap();
         m.update(input);
         let mut out = [0u8; 32];
         out.copy_from_slice(&m.finalize().into_bytes());

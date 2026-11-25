@@ -6,10 +6,10 @@ use crate::keydesc::{
     DIGEST_SHA256, EC_CURVE_P256, ORIGIN_GENERATED, PURPOSE_SIGN, SECURITY_LEVEL_STRONGBOX,
 };
 use p256::ecdsa::signature::hazmat::PrehashVerifier;
-use p256::elliptic_curve::sec1::ToEncodedPoint;
+use p256::elliptic_curve::sec1::ToSec1Point;
 use rsa::pkcs1::DecodeRsaPublicKey;
 use rsa::traits::PublicKeyParts;
-use rsa::{Pkcs1v15Sign, RsaPublicKey};
+use rsa::{Pkcs1v15Sign, PublicKey as RsaPublicKey};
 use sha2::{Digest, Sha256, Sha384, Sha512};
 use subtle::ConstantTimeEq;
 use x509_cert::certificate::Version;
@@ -31,7 +31,9 @@ pub const MIN_CHAIN_LEN: usize = 2;
 pub const MAX_CHAIN_LEN: usize = 5;
 
 const MIN_ATTESTATION_VERSION: u64 = 4;
-const MIN_RSA_BITS: usize = 2048;
+const MIN_RSA_BITS: u32 = 2048;
+// rsa 0.9 refused moduli above 4096 bits while parsing; rsa 0.10 accepts up to 8192, so keep the old ceiling.
+const MAX_RSA_BITS: u32 = 4096;
 const MAX_CERT_LEN: usize = 16 * 1024;
 const MAX_SERIAL_LEN: usize = 32;
 const MAX_AVB_KEY_LEN: usize = 64;
@@ -126,7 +128,8 @@ impl IssuerKey {
                 return None;
             }
             let key = RsaPublicKey::from_pkcs1_der(bytes).ok()?;
-            if key.n().bits() < MIN_RSA_BITS {
+            let bits = key.n().bit_width();
+            if !(MIN_RSA_BITS..=MAX_RSA_BITS).contains(&bits) {
                 return None;
             }
             Some(IssuerKey::Rsa(key))
@@ -225,10 +228,10 @@ impl TrustConfig {
             if cert.to_der().map_err(|_| bad)?.as_slice() != *der {
                 return Err(bad);
             }
-            let spki = &cert.tbs_certificate.subject_public_key_info;
+            let spki = cert.tbs_certificate().subject_public_key_info();
             let key = IssuerKey::from_spki(spki).ok_or(bad)?;
             parsed.push(TrustedRoot {
-                subject: cert.tbs_certificate.subject.to_der().map_err(|_| bad)?,
+                subject: cert.tbs_certificate().subject().to_der().map_err(|_| bad)?,
                 key,
                 spki_hash: sha256_32(&spki.to_der().map_err(|_| bad)?),
             });
@@ -355,16 +358,16 @@ fn parse_cert(der: &[u8], index: usize) -> Result<Certificate, AttestError> {
     if c.to_der().map_err(|_| bad)?.as_slice() != der {
         return Err(bad);
     }
-    if c.tbs_certificate.version != Version::V3 || c.signature_algorithm != c.tbs_certificate.signature {
+    if c.tbs_certificate().version() != Version::V3 || c.signature_algorithm() != c.tbs_certificate().signature() {
         return Err(bad);
     }
     Ok(c)
 }
 
 fn verify_cert_sig(cert: &Certificate, key: &IssuerKey, index: usize) -> Result<(), AttestError> {
-    let tbs = cert.tbs_certificate.to_der().map_err(|_| AttestError::CertMalformed { index })?;
-    let sig = cert.signature.as_bytes().ok_or(AttestError::CertMalformed { index })?;
-    key.verify(&cert.signature_algorithm, &tbs, sig).map_err(|e| match e {
+    let tbs = cert.tbs_certificate().to_der().map_err(|_| AttestError::CertMalformed { index })?;
+    let sig = cert.signature().as_bytes().ok_or(AttestError::CertMalformed { index })?;
+    key.verify(cert.signature_algorithm(), &tbs, sig).map_err(|e| match e {
         SigFail::Unsupported => AttestError::UnsupportedAlgorithm { index },
         SigFail::Bad => AttestError::BadSignature { index },
     })
@@ -372,7 +375,7 @@ fn verify_cert_sig(cert: &Certificate, key: &IssuerKey, index: usize) -> Result<
 
 fn require_ca(cert: &Certificate, index: usize) -> Result<(), AttestError> {
     let not_ca = AttestError::IssuerNotCa { index };
-    let exts = cert.tbs_certificate.extensions.as_deref().unwrap_or(&[]);
+    let exts = cert.tbs_certificate().extensions().map(Vec::as_slice).unwrap_or(&[]);
     let mut found = exts.iter().filter(|e| e.extn_id == OID_BASIC_CONSTRAINTS);
     let ext = found.next().ok_or(not_ca)?;
     if found.next().is_some() {
@@ -387,7 +390,7 @@ fn require_ca(cert: &Certificate, index: usize) -> Result<(), AttestError> {
 }
 
 fn leaf_pub33(cert: &Certificate) -> Result<[u8; 33], AttestError> {
-    let spki = &cert.tbs_certificate.subject_public_key_info;
+    let spki = cert.tbs_certificate().subject_public_key_info();
     if spki.algorithm.oid != OID_EC_PUBLIC_KEY {
         return Err(AttestError::LeafKeyNotP256);
     }
@@ -402,7 +405,7 @@ fn leaf_pub33(cert: &Certificate) -> Result<[u8; 33], AttestError> {
     }
     let bytes = spki.subject_public_key.as_bytes().ok_or(AttestError::LeafKeyNotP256)?;
     let pk = p256::PublicKey::from_sec1_bytes(bytes).map_err(|_| AttestError::LeafKeyNotP256)?;
-    let enc = pk.to_encoded_point(true);
+    let enc = pk.to_sec1_point(true);
     <[u8; 33]>::try_from(enc.as_bytes()).map_err(|_| AttestError::LeafKeyNotP256)
 }
 
@@ -438,7 +441,7 @@ fn verify_inner(
     }
     // E2-1: the root must come from the config, never from the peer.
     for (i, c) in certs.iter().enumerate() {
-        let spki = c.tbs_certificate.subject_public_key_info.to_der().map_err(|_| AttestError::CertMalformed { index: i })?;
+        let spki = c.tbs_certificate().subject_public_key_info().to_der().map_err(|_| AttestError::CertMalformed { index: i })?;
         let h = sha256_32(&spki);
         if cfg.roots.iter().any(|r| bool::from(r.spki_hash.ct_eq(&h))) {
             return Err(AttestError::RootInChain { index: i });
@@ -450,19 +453,19 @@ fn verify_inner(
             (Some(c), Some(p)) => (c, p),
             _ => return Err(AttestError::ChainLength),
         };
-        let issuer = child.tbs_certificate.issuer.to_der().map_err(|_| AttestError::CertMalformed { index: i })?;
-        let subject = parent.tbs_certificate.subject.to_der().map_err(|_| AttestError::CertMalformed { index: i + 1 })?;
+        let issuer = child.tbs_certificate().issuer().to_der().map_err(|_| AttestError::CertMalformed { index: i })?;
+        let subject = parent.tbs_certificate().subject().to_der().map_err(|_| AttestError::CertMalformed { index: i + 1 })?;
         if issuer != subject {
             return Err(AttestError::NameChainBroken { index: i });
         }
         require_ca(parent, i + 1)?;
-        let key = IssuerKey::from_spki(&parent.tbs_certificate.subject_public_key_info)
+        let key = IssuerKey::from_spki(&parent.tbs_certificate().subject_public_key_info())
             .ok_or(AttestError::UnsupportedAlgorithm { index: i })?;
         verify_cert_sig(child, &key, i)?;
     }
     // E2-1: the last certificate must be signed by a configured root.
     let last = certs.last().ok_or(AttestError::ChainLength)?;
-    let last_issuer = last.tbs_certificate.issuer.to_der().map_err(|_| AttestError::CertMalformed { index: n - 1 })?;
+    let last_issuer = last.tbs_certificate().issuer().to_der().map_err(|_| AttestError::CertMalformed { index: n - 1 })?;
     let anchored = cfg
         .roots
         .iter()
@@ -472,7 +475,7 @@ fn verify_inner(
     }
     // E2-2: revocation snapshot.
     for (i, c) in certs.iter().enumerate() {
-        let serial = strip_leading_zeros(c.tbs_certificate.serial_number.as_bytes());
+        let serial = strip_leading_zeros(c.tbs_certificate().serial_number().as_bytes());
         if cfg.revoked.iter().any(|r| r.as_slice() == serial) {
             return Err(AttestError::Revoked { index: i });
         }
@@ -484,7 +487,7 @@ fn verify_inner(
         return Err(AttestError::LeafKeyMismatch);
     }
     // E2-4: exactly one KeyDescription.
-    let exts = leaf.tbs_certificate.extensions.as_deref().unwrap_or(&[]);
+    let exts = leaf.tbs_certificate().extensions().map(Vec::as_slice).unwrap_or(&[]);
     let mut kds = exts.iter().filter(|e| e.extn_id == OID_KEY_DESCRIPTION);
     let kd_ext = kds.next().ok_or(AttestError::KeyDescriptionMissing)?;
     if kds.next().is_some() {
