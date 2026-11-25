@@ -23,10 +23,9 @@ module tree, then zip the module.
    secure session can start; the boot restore hook is still installed.
 
 3. Zip the contents of `magisk-module/` (with `module.prop` at the zip root)
-   and install it from a root shell with `magisk --install-module <zip>`.
-   Installing from the Magisk app additionally needs the standard
-   `META-INF/com/google/android/update-binary` and `updater-script` files,
-   which this tree does not ship yet. Not verified on a device.
+   and install it either from the Magisk / KernelSU / APatch manager GUI
+   (via `META-INF/com/google/android/update-binary` and `updater-script`) or
+   from a root shell with `magisk --install-module <zip>`.
 
 ## policy.conf (required)
 

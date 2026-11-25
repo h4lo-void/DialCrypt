@@ -1,0 +1,23 @@
+#!/sbin/sh
+TMPDIR=/dev/tmp
+PERSISTDIR=/sbin/.magisk/mirror/persist
+
+rm -rf "$TMPDIR" 2>/dev/null
+mkdir -p "$TMPDIR"
+chcon u:object_r:system_file:s0 "$TMPDIR" 2>/dev/null
+
+export BOOTMODE=true
+unzip -o "$3" 'META-INF/com/google/android/*' -d "$TMPDIR" >&2
+
+if [ -f /data/adb/magisk/util_functions.sh ]; then
+  . /data/adb/magisk/util_functions.sh
+elif [ -f /data/adb/ksu/bin/busybox ]; then
+  unzip -o "$3" -x 'META-INF/*' -d "/data/adb/modules_update/aegischat_audio_firewall" >&2
+  exit 0
+else
+  echo "! Unable to locate Magisk/KernelSU installer functions"
+  exit 1
+fi
+
+install_module
+exit 0
