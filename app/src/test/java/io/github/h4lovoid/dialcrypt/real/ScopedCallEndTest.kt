@@ -92,6 +92,18 @@ class ScopedCallEndTest {
         return cond()
     }
 
+    /**
+     * Waits until the engine's watchers have subscribed to the link. The call watcher handles the
+     * link's first (idle) status by clearing the incoming offer; an offer shown before that would be
+     * cleared again.
+     */
+    private fun awaitWatchers(link: Link) {
+        assertTrue(
+            "watchers did not subscribe",
+            waitFor { link.status.subscriptionCount.value > 0 && link.offers.subscriptionCount.value > 0 },
+        )
+    }
+
     @Test
     fun theScopedLockClearsTheEndScreen() {
         for (phase in listOf(SessionPhase.ABORTED, SessionPhase.CLEARED)) {
@@ -113,6 +125,7 @@ class ScopedCallEndTest {
         for (phase in listOf(SessionPhase.ABORTED, SessionPhase.CLEARED)) {
             val link = Link()
             val engine = engine(Host(scoped = false, present = true), link)
+            awaitWatchers(link)
             endedCall(engine, phase)
             link.offers.value = IncomingOffer(ByteArray(16) { 1 }, "+447700900123", NumberPresentation.SHOWN)
             assertTrue(phase.name, waitFor { engine.incoming.value != null })
