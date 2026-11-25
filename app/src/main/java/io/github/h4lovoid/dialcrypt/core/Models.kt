@@ -55,6 +55,11 @@ data class CoreState(
     val callScoped: Boolean = false,
     /** The user is turning fingerprint answer on: the next PIN unlock keeps the PIN stretch for it. */
     val bioEnrollPending: Boolean = false,
+    /**
+     * False when the secure hardware does not enforce single-use keys and the Android key store
+     * counts the PIN tries: software with root access can reset the count.
+     */
+    val singleUseHardwareEnforced: Boolean = true,
 )
 
 /**

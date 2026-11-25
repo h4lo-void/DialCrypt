@@ -92,6 +92,7 @@
     <string name="pin_error_same">Le code d’urgence doit être différent de votre code PIN.</string>
     <string name="pin_error_wrong_current">Le code PIN actuel est incorrect.</string>
     <string name="pin_error_unsupported">Ce téléphone ne peut pas protéger le code dans le matériel : il ne peut pas être utilisé.</string>
+    <string name="pin_tries_software_note">Sur ce téléphone, les cinq essais du code sont comptés par Android et non par la puce de sécurité. Sans accès root, la limite tient ; un logiciel disposant de l’accès root peut remettre le compteur à zéro et rouvrir d’anciennes copies du coffre-fort : choisissez donc un code long.</string>
     <string name="pin_error_not_connected">Le cœur sécurisé n’est pas connecté.</string>
     <string name="pin_error_failed">Les codes n’ont pas pu être enregistrés. Réessayez.</string>
     <string name="unlock_title">Saisissez le code PIN</string>

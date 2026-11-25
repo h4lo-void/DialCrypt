@@ -13,7 +13,7 @@ val aegisSigningConfigured = aegisKeystore != null && aegisKeystorePass != null 
 
 // Test switches. They only reach the fieldTest build type; release always has them off.
 // AEGIS_TEST_NO_PIN=1: the vault opens with a built-in PIN and no PIN screen is shown (core/TestNoPin.kt).
-// AEGIS_FIELD_TEST=1: soft single-use PIN tickets are accepted and the line probe reads files from filesDir.
+// AEGIS_FIELD_TEST=1: the line probe reads files from filesDir.
 val aegisTestNoPin = System.getenv("AEGIS_TEST_NO_PIN") == "1"
 val aegisFieldTest = System.getenv("AEGIS_FIELD_TEST") == "1"
 
@@ -47,7 +47,6 @@ android {
         getByName("debug") {
             // Debug builds run against the fake core; the test switches stay off.
             buildConfigField("boolean", "TEST_NO_PIN", "false")
-            buildConfigField("boolean", "FIELD_TEST_SOFT_TICKETS", "false")
             buildConfigField("boolean", "FIELD_TEST_LINK_PROBE", "false")
             // Settings show the "Phone app" section (default dialer role) in debug builds.
             buildConfigField("boolean", "DIALER_ROLE_UI", "true")
@@ -68,7 +67,6 @@ android {
             }
             // Hard-wired off: a release build can never carry a test switch, whatever the environment says.
             buildConfigField("boolean", "TEST_NO_PIN", "false")
-            buildConfigField("boolean", "FIELD_TEST_SOFT_TICKETS", "false")
             buildConfigField("boolean", "FIELD_TEST_LINK_PROBE", "false")
             // No "Phone app" section until the default dialer has passed the on-device checks.
             buildConfigField("boolean", "DIALER_ROLE_UI", "false")
@@ -83,10 +81,6 @@ android {
             if (aegisSigningConfigured) {
                 signingConfig = signingConfigs.getByName("aegisRelease")
             }
-            // Field-test builds only (AEGIS_FIELD_TEST=1): accept phones whose key store limits
-            // single-use PIN tickets in software because the secure hardware does not declare
-            // android.hardware.keystore.single_use_key.
-            buildConfigField("boolean", "FIELD_TEST_SOFT_TICKETS", aegisFieldTest.toString())
             // Field-test builds only (AEGIS_FIELD_TEST=1): the line probe and the narrowband gear switch read their files from filesDir.
             buildConfigField("boolean", "FIELD_TEST_LINK_PROBE", aegisFieldTest.toString())
             // Test builds only (AEGIS_TEST_NO_PIN=1): the vault opens with a built-in PIN and no PIN screen is shown.

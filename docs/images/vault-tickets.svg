@@ -74,7 +74,7 @@
   <g opacity="0"><animate attributeName="opacity" values="0;1;0;0" keyTimes="0.0000;0.3750;0.6000;1.0000" dur="16s" repeatCount="indefinite" calcMode="discrete"/>
     <rect x="40" y="346" width="140.4" height="32" rx="16" fill="#E0796B" fill-opacity="0.14" stroke="#E0796B" stroke-opacity="0.7" stroke-width="1.2"/>
     <text x="110.2" y="368" font-family="system-ui, -apple-system, Segoe UI, Helvetica, Arial, sans-serif" font-size="16.5" font-weight="700" text-anchor="middle" fill="#E0796B">Wrong again</text>
-    <text x="196.4" y="368" font-family="system-ui, -apple-system, Segoe UI, Helvetica, Arial, sans-serif" font-size="14.2" fill="#F4EFE4">Three left. Restoring an old copy of the vault restores no key.</text>
+    <text x="196.4" y="368" font-family="system-ui, -apple-system, Segoe UI, Helvetica, Arial, sans-serif" font-size="14.2" fill="#F4EFE4">Three left. An old vault copy brings back no key without root.</text>
   </g>
   <g opacity="0"><animate attributeName="opacity" values="0;1;0;0" keyTimes="0.0000;0.6000;0.7875;1.0000" dur="16s" repeatCount="indefinite" calcMode="discrete"/>
     <rect x="40" y="346" width="140.4" height="32" rx="16" fill="#7FD1AE" fill-opacity="0.14" stroke="#7FD1AE" stroke-opacity="0.7" stroke-width="1.2"/>

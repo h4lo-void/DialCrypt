@@ -130,8 +130,8 @@ changes only if `~/aegis-build/keys/test-release.jks` is replaced. Add it to
 ## Field-test builds
 
 The test switches `AEGIS_TEST_NO_PIN=1` (built-in test PIN, no PIN screen) and
-`AEGIS_FIELD_TEST=1` (software-limited single-use PIN tickets accepted, line
-probe files read from `filesDir`) only take effect in the `fieldTest` build
+`AEGIS_FIELD_TEST=1` (line probe files read from `filesDir`)
+only take effect in the `fieldTest` build
 type. It compiles the release sources with the release signing settings and
 gets the version name suffix `-fieldtest`. The release build type always has
 all three switches off, and Gradle stops with an error if

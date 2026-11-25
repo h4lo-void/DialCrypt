@@ -92,6 +92,7 @@
     <string name="pin_error_same">The emergency PIN must be different from your PIN.</string>
     <string name="pin_error_wrong_current">The current PIN is wrong.</string>
     <string name="pin_error_unsupported">This phone cannot protect the PIN in hardware, so it cannot be used.</string>
+    <string name="pin_tries_software_note">On this phone Android, not the security chip, counts the five PIN tries. Without root access the limit holds; software with root access can reset it and reopen older copies of the vault, so choose a long PIN.</string>
     <string name="pin_error_not_connected">The secure core is not connected.</string>
     <string name="pin_error_failed">The PINs could not be saved. Try again.</string>
     <string name="unlock_title">Enter PIN</string>
