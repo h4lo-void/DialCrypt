@@ -54,6 +54,16 @@ done
 APKSIGNER=$ANDROID_HOME/build-tools/$BUILD_TOOLS_VERSION/apksigner
 [ -x "$APKSIGNER" ] || die "apksigner not found at $APKSIGNER"
 
+# --- 0. attestation revocation list & path remapping ------------------------
+if [ "${AEGIS_OFFLINE_BUILD:-0}" != "1" ] && command -v python3 >/dev/null 2>&1; then
+  step "0. refresh Google attestation revocation list"
+  python3 "$ROOT/tools/android-build/update_attestation_crl.py"
+fi
+
+CARGO_HOME_PATH=${CARGO_HOME:-$HOME/.cargo}
+REMAP_FLAGS="--remap-path-prefix=$ROOT=/workspace --remap-path-prefix=$CARGO_HOME_PATH=/cargo --remap-path-prefix=$HOME=/builder"
+export RUSTFLAGS="${RUSTFLAGS:+$RUSTFLAGS }$REMAP_FLAGS"
+
 # --- a. JNI library ---------------------------------------------------------
 step "a. aegiscall-jni (release, arm64-v8a)"
 JNI_DIR=$ROOT/app/src/main/jniLibs
@@ -68,6 +78,12 @@ cargo ndk -t arm64-v8a -P "$ANDROID_API" build --release --locked -p aegiscalld
 DAEMON_BIN=$ROOT/target/aarch64-linux-android/release/aegiscalld
 [ -f "$DAEMON_BIN" ] || die "aegiscalld was not produced at $DAEMON_BIN"
 
+for bin in "$JNI_SO" "$DAEMON_BIN"; do
+  if grep -Fq "$HOME" "$bin"; then
+    die "host path ($HOME) leaked into binary $bin"
+  fi
+done
+
 # --- c. test signing key ----------------------------------------------------
 step "c. test signing key"
 if [ ! -f "$KEYSTORE_FILE" ]; then
@@ -76,10 +92,10 @@ if [ ! -f "$KEYSTORE_FILE" ]; then
   chmod 700 "$KEY_DIR"
   openssl rand -hex 24 > "$PASS_FILE"
   chmod 600 "$PASS_FILE"
-  if ! keytool -genkeypair -storetype PKCS12 -keystore "$KEYSTORE_FILE" \
+  if ! TZ=UTC keytool -genkeypair -storetype PKCS12 -keystore "$KEYSTORE_FILE" \
       -storepass:file "$PASS_FILE" -alias "$KEY_ALIAS_NAME" \
       -keyalg RSA -keysize 4096 -validity 10950 \
-      -dname "CN=DialCrypt Test Release, O=DialCrypt Test" >/dev/null 2>&1; then
+      -dname "CN=DialCrypt Release" >/dev/null 2>&1; then
     rm -f "$KEYSTORE_FILE" "$PASS_FILE"
     die "keytool could not create the test keystore"
   fi
@@ -114,6 +130,9 @@ find "$MODULE" -name .DS_Store -exec rm -f {} +
 mkdir -p "$MODULE/system/bin" "$MODULE/system/priv-app/DialCrypt"
 install -m 0755 "$DAEMON_BIN" "$MODULE/system/bin/aegiscalld"
 install -m 0644 "$APK" "$MODULE/system/priv-app/DialCrypt/DialCrypt.apk"
+if [ -f "$MODULE/META-INF/com/google/android/update-binary" ]; then
+  chmod 0755 "$MODULE/META-INF/com/google/android/update-binary"
+fi
 (cd "$MODULE" && zip -q -X -r "$ZIP" .)
 MODULE_APK=$MODULE/system/priv-app/DialCrypt/DialCrypt.apk
 

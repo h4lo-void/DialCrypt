@@ -26,9 +26,9 @@ use x509_cert::spki::{EncodePublicKey, SubjectPublicKeyInfoOwned};
 use x509_cert::time::Validity;
 
 mod call;
+mod pairing_psk_security;
 mod pin;
 mod registry;
-mod review_psk;
 
 pub(crate) const PIN: &[u8] = b"2580";
 pub(crate) const DURESS: &[u8] = b"9110";

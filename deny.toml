@@ -8,6 +8,14 @@ no-default-features = false
 [advisories]
 version = 2
 yanked = "warn"
+ignore = [
+    # Marvin attack: timing of RSA private-key operations (decryption, signing) can leak the key.
+    # DialCrypt only uses RSA public keys: PKCS#1 v1.5 signature verification of attestation
+    # chains (aegiscall-trust/src/attest.rs) and OAEP encryption to the StrongBox wrapping key
+    # (aegiscall-trust/src/wrap.rs). RsaPrivateKey appears only in tests. Drop this entry when
+    # moving to rsa 0.10, which fixes the advisory.
+    { id = "RUSTSEC-2023-0071", reason = "rsa is used for public-key operations only; no private-key operation runs outside tests" },
+]
 
 [licenses]
 version = 2
