@@ -10,6 +10,12 @@ interface HardwareKeyBridge {
     val editionName: String
     val isHardwareStrongBoxBacked: Boolean
 
+    /**
+     * True when the secure hardware itself enforces the use count of single-use keys
+     * (android.hardware.keystore.single_use_key). False when only the Android key store counts the
+     * uses: software with root access can then reset the count.
+     */
+    val singleUseHardwareEnforced: Boolean
 
     /**
      * Creates or loads the identity signing key `aegis_id_v2` (P-256, SIGN only, SHA-256,
@@ -21,8 +27,8 @@ interface HardwareKeyBridge {
     fun signSha256Ecdsa(message: ByteArray): ByteArray
 
     /**
-     * True only when the device has single-use StrongBox keys and a probe key really refuses a
-     * second use (design 6.5 self-check before a PIN is set).
+     * True only when a single-use StrongBox probe key really refuses a second use (design 6.5
+     * self-check before a PIN is set), whether the secure hardware or the key store counts the uses.
      */
     fun selfTestSingleUseTickets(): Boolean
 

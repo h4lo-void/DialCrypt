@@ -153,6 +153,7 @@ class NativeSecureCore(
         val blob = vault.read()
         // Before any unlock attempt: only the tickets of the file on disk stay.
         val live = if (blob == null) keys.listTickets() else retireOrphans(blob)
+        val enforced = keys.singleUseHardwareEnforced
         coreState.value = when {
             blob == null -> {
                 // Tickets without a vault belong to an interrupted setup.
@@ -161,14 +162,20 @@ class NativeSecureCore(
                 metaStore.wipe()
                 numberIndex.wipe()
                 dropBiometric()
-                CoreState(CoreAvailability.READY, pinConfigured = false, locked = true)
+                CoreState(CoreAvailability.READY, pinConfigured = false, locked = true, singleUseHardwareEnforced = enforced)
             }
             live.isEmpty() -> {
                 // A dead vault: fingerprint answer can never open it again.
                 dropBiometric()
-                CoreState(CoreAvailability.READY, pinConfigured = true, locked = true, attemptsLeft = 0, vaultDestroyed = true)
+                CoreState(
+                    CoreAvailability.READY, pinConfigured = true, locked = true, attemptsLeft = 0, vaultDestroyed = true,
+                    singleUseHardwareEnforced = enforced,
+                )
             }
-            else -> CoreState(CoreAvailability.READY, pinConfigured = true, locked = true, attemptsLeft = attempts(live))
+            else -> CoreState(
+                CoreAvailability.READY, pinConfigured = true, locked = true, attemptsLeft = attempts(live),
+                singleUseHardwareEnforced = enforced,
+            )
         }
         refreshBio()
     }
@@ -1184,7 +1191,9 @@ class NativeSecureCore(
             if (!vault.destroy()) Log.e(TAG, "vault file destruction incomplete")
             io.github.h4lovoid.dialcrypt.core.daemon.DaemonTrim.requestBestEffort()
             clearContacts()
-            coreState.value = CoreState(CoreAvailability.NOT_CONNECTED, pinConfigured = false, locked = true)
+            coreState.update {
+                CoreState(CoreAvailability.NOT_CONNECTED, pinConfigured = false, locked = true, singleUseHardwareEnforced = it.singleUseHardwareEnforced)
+            }
         }
     }
 

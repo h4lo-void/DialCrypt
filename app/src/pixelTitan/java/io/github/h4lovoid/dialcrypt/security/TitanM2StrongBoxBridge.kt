@@ -11,7 +11,6 @@ import android.security.keystore.KeyProtection
 import android.security.keystore.StrongBoxUnavailableException
 import android.security.keystore.WrappedKeyEntry
 import android.util.Log
-import io.github.h4lovoid.dialcrypt.BuildConfig
 import java.security.KeyFactory
 import java.security.KeyPairGenerator
 import java.security.KeyStore
@@ -40,6 +39,8 @@ class TitanM2StrongBoxBridge(private val context: Context) : HardwareKeyBridge {
     override val isHardwareStrongBoxBacked: Boolean
         get() = context.packageManager.hasSystemFeature(PackageManager.FEATURE_STRONGBOX_KEYSTORE)
 
+    override val singleUseHardwareEnforced: Boolean
+        get() = context.packageManager.hasSystemFeature(PackageManager.FEATURE_KEYSTORE_SINGLE_USE_KEY)
 
     // ---- secure-session v2: identity signing key and single-use PIN tickets (design 6.5, 6.6) ----
 
@@ -128,11 +129,10 @@ class TitanM2StrongBoxBridge(private val context: Context) : HardwareKeyBridge {
 
     override fun selfTestSingleUseTickets(): Boolean {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S) return false
-        val hardwareEnforced = context.packageManager.hasSystemFeature(PackageManager.FEATURE_KEYSTORE_SINGLE_USE_KEY)
-        if (!hardwareEnforced) {
-            // Without the feature only the key store, not the secure hardware, counts the uses.
-            Log.w(TAG, "single-use keys are not hardware enforced; field test build=" + BuildConfig.FIELD_TEST_SOFT_TICKETS)
-            if (!BuildConfig.FIELD_TEST_SOFT_TICKETS) return false
+        if (!singleUseHardwareEnforced) {
+            // Without the feature the Android key store, not the secure hardware, counts the uses.
+            // The probe below must still see the second use refused.
+            Log.w(TAG, "single-use keys are counted by the key store, not by the secure hardware")
         }
         val material = ByteArray(32).also { SecureRandom().nextBytes(it) }
         try {

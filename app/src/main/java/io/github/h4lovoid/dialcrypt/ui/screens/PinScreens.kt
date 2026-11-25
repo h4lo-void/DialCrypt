@@ -129,6 +129,7 @@ fun PinWizardScreen(
     val host = LocalInputHost.current
     val scope = rememberCoroutineScope()
     val haptics = rememberHaptics()
+    val coreState by core.state.collectAsState()
 
     val step = steps[index]
     val input = inputs.getValue(step)
@@ -241,6 +242,11 @@ fun PinWizardScreen(
             if (step == PinStep.DURESS) {
                 Card(borderColor = Palette.Warn) {
                     InlineMessage(stringResource(R.string.pin_duress_warning), Tone.WARN)
+                }
+            }
+            if (step == PinStep.NEW && !coreState.singleUseHardwareEnforced) {
+                Card(borderColor = Palette.Warn) {
+                    InlineMessage(stringResource(R.string.pin_tries_software_note), Tone.WARN)
                 }
             }
             Card {
