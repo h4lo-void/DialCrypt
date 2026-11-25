@@ -1255,6 +1255,22 @@ impl Bridge {
         wideband: bool,
         now: i64,
     ) -> Result<i64, i32> {
+        let gear_code = if wideband { ModemGear::Wideband2400 as i32 } else { ModemGear::Narrowband1200 as i32 };
+        self.session_create_gear(app, dial, contact, peer_e164, gear_code, now)
+    }
+
+    /// Like [Bridge::session_create], selecting any wire [ModemGear] (`1` Narrowband1200,
+    /// `2` Wideband2400, `3` Robust300, `4` Speech300).
+    pub fn session_create_gear(
+        &self,
+        app: i64,
+        dial: bool,
+        contact: i32,
+        peer_e164: Option<&[u8]>,
+        gear_code: i32,
+        now: i64,
+    ) -> Result<i64, i32> {
+        let gear = u8::try_from(gear_code).ok().and_then(ModemGear::from_wire).ok_or(BAD_ARG)?;
         let now = now_ms(now)?;
         if peer_e164.is_some_and(|n| n.len() > MAX_PHONE_LEN) {
             return Err(BAD_ARG);
@@ -1290,7 +1306,6 @@ impl Bridge {
                     .map(|r| ResumeCandidate { contact: r.contact, pub33: r.pub33, secret: r.secret, is_new: r.is_new })
                     .collect(),
             };
-            let gear = if wideband { ModemGear::Wideband2400 } else { ModemGear::Narrowband1200 };
             let mut call = SecureCallSession::new(local, expect, side, stored, gear, now).map_err(|_| BAD_STATE)?;
             call.provide_evidence_chain(&chain).map_err(|_| BAD_STATE)?;
             self.sessions.insert(h, app_h, Session::new(h, entry, call, gear, now))?;

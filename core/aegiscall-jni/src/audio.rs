@@ -19,8 +19,8 @@
 use aegiscall_chat::{SecureCallSession, TxUnit};
 use aegiscall_modem::{
     decode_superframe_fec_soft, deinterleave_384_soft, detect_preamble, encode_superframe_fec, interleave_384,
-    synthesize_preamble, FormantDemodulator, FormantModulator, ModemGear, PreambleCapabilities, PreambleDetection,
-    FRAME_SAMPLES, TOTAL_PREAMBLE_SAMPLES,
+    resample_farrow_i16, synthesize_preamble, FormantDemodulator, FormantModulator, ModemGear,
+    PreambleCapabilities, PreambleDetection, FRAME_SAMPLES, TOTAL_PREAMBLE_SAMPLES,
 };
 
 /// Largest PCM chunk accepted per receive call (2 s at 16 kHz).
@@ -165,8 +165,19 @@ impl RxModem {
             }
         }
         let Some(sync) = self.sync.as_mut() else { return false };
-        let Some(frame) = self.buf.get(self.head..self.head + sf) else { return false };
-        let llr = sync.demod.demodulate_superframe(frame);
+        let exact_start = self.head as f64 + sync.clock.frac;
+        let step = 1.0 + sync.clock.skew;
+        let needed_end = (exact_start + (sf as f64) * step + 2.0).ceil().max(0.0) as usize;
+        if needed_end > self.buf.len() {
+            return false;
+        }
+        let llr = if sync.clock.skew.abs() > 1e-7 || sync.clock.frac.abs() > 1e-7 {
+            let resampled = resample_farrow_i16(&self.buf, exact_start.max(0.0), step, sf);
+            sync.demod.demodulate_superframe(&resampled)
+        } else {
+            let Some(frame) = self.buf.get(self.head..self.head + sf) else { return false };
+            sync.demod.demodulate_superframe(frame)
+        };
         let deint = deinterleave_384_soft(&llr, gear.frames_per_superframe());
         let wire = decode_superframe_fec_soft(&deint);
         self.head += sync.clock.advance(sf);

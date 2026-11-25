@@ -24,6 +24,8 @@ class SharedPrefsUiPreferences(
     override val incomingMode: StateFlow<IncomingMode> = incomingFlow
     private val fullNumbersFlow = MutableStateFlow(prefs.getBoolean(KEY_FULL_NUMBERS, false))
     override val showFullNumbers: StateFlow<Boolean> = fullNumbersFlow
+    private val modemFlow = MutableStateFlow(ModemMode.fromName(prefs.getString(KEY_MODEM_MODE, null)))
+    override val modemMode: StateFlow<ModemMode> = modemFlow
 
     init {
         // A preference saved before the mirror existed is copied once, so `:call` sees the same choice.
@@ -39,6 +41,11 @@ class SharedPrefsUiPreferences(
         fullNumbersFlow.value = show
     }
 
+    override fun setModemMode(mode: ModemMode) {
+        prefs.edit().putString(KEY_MODEM_MODE, mode.name).apply()
+        modemFlow.value = mode
+    }
+
     override fun setLanguage(language: AppLanguage) {
         prefs.edit().putString(KEY, language.name).apply()
         flow.value = language
@@ -49,9 +56,16 @@ class SharedPrefsUiPreferences(
         incomingFlow.value = mode
     }
 
-    private companion object {
+    companion object {
+        const val PREFS_NAME = "ui_prefs"
         const val KEY = "language"
         const val KEY_FULL_NUMBERS = "show_full_numbers"
+        const val KEY_MODEM_MODE = "modem_mode"
+
+        fun readModemMode(context: Context?): ModemMode {
+            val sp = context?.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE) ?: return ModemMode.WIDEBAND
+            return ModemMode.fromName(sp.getString(KEY_MODEM_MODE, null))
+        }
     }
 }
 

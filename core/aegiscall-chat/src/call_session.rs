@@ -46,6 +46,8 @@ pub const PREAMBLE_REPEAT_MS: u64 = 2_000;
 /// cycle of frames until the next preamble).
 pub const RESYNC_PREAMBLE_SLOTS_WIDE: u32 = 24;
 pub const RESYNC_PREAMBLE_SLOTS_NARROW: u32 = 12;
+/// On 300 bps gears (1.28 s per superframe), 4 superframes = 5.12 s (~7.2 % preamble duty cycle).
+pub const RESYNC_PREAMBLE_SLOTS_300: u32 = 4;
 /// Whole handshake limit (doubled on narrowband).
 pub const HANDSHAKE_LIMIT_MS: u64 = 90_000;
 /// No new handshake fragment for this long aborts (doubled on narrowband). Also bounds the time
@@ -1721,7 +1723,10 @@ impl SecureCallSession {
     }
 
     fn slow(&self) -> u64 {
-        if self.gear == ModemGear::Narrowband1200 || self.peer_gear == Some(ModemGear::Narrowband1200) {
+        let is_300 = |g: ModemGear| matches!(g, ModemGear::Robust300 | ModemGear::Speech300);
+        if is_300(self.gear) || self.peer_gear.is_some_and(is_300) {
+            8
+        } else if self.gear == ModemGear::Narrowband1200 || self.peer_gear == Some(ModemGear::Narrowband1200) {
             2
         } else {
             1
@@ -1730,10 +1735,10 @@ impl SecureCallSession {
 
     /// Time for the periodic re-synchronisation preamble.
     fn resync_preamble_slot(&self) -> bool {
-        let every = if self.gear == ModemGear::Narrowband1200 {
-            RESYNC_PREAMBLE_SLOTS_NARROW
-        } else {
-            RESYNC_PREAMBLE_SLOTS_WIDE
+        let every = match self.gear {
+            ModemGear::Robust300 | ModemGear::Speech300 => RESYNC_PREAMBLE_SLOTS_300,
+            ModemGear::Narrowband1200 => RESYNC_PREAMBLE_SLOTS_NARROW,
+            ModemGear::Wideband2400 => RESYNC_PREAMBLE_SLOTS_WIDE,
         };
         self.slots_since_preamble >= every
     }

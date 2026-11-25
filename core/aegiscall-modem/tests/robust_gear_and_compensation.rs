@@ -102,16 +102,30 @@ fn robust_gear_roundtrip_clean_and_over_harsh_narrowband_channel() {
 }
 
 #[test]
-fn robust_preamble_is_visible_to_tools_but_not_negotiable() {
-    let caps = PreambleCapabilities::v2(ModemGear::Robust300);
-    let mut pcm = vec![0i16; 300];
-    pcm.extend(synthesize_preamble(caps));
-    pcm.extend(vec![0i16; 320]);
-    let raw = detect_preamble_raw(&pcm).expect("raw detection accepts any gear");
-    assert_eq!(raw.raw, caps.encode_bytes());
-    assert_eq!(raw.announced_gear(), Some(ModemGear::Robust300));
-    assert!(detect_preamble(&pcm).is_none(), "the session-facing detector must keep rejecting gear 3");
-    assert_eq!(PreambleCapabilities::decode_bytes(&caps.encode_bytes()), None);
+fn robust_and_speech_preambles_are_negotiable_while_unknown_gears_reject() {
+    for gear in [
+        ModemGear::Narrowband1200,
+        ModemGear::Wideband2400,
+        ModemGear::Robust300,
+        ModemGear::Speech300,
+    ] {
+        let caps = PreambleCapabilities::v2(gear);
+        let mut pcm = vec![0i16; 300];
+        pcm.extend(synthesize_preamble(caps));
+        pcm.extend(vec![0i16; 320]);
+        let raw = detect_preamble_raw(&pcm).expect("raw detection accepts any gear");
+        assert_eq!(raw.raw, caps.encode_bytes());
+        assert_eq!(raw.announced_gear(), Some(gear));
+        let det = detect_preamble(&pcm).expect("session-facing detector accepts all 4 live gears");
+        assert_eq!(det.peer_caps, caps);
+        assert_eq!(PreambleCapabilities::decode_bytes(&caps.encode_bytes()), Some(caps));
+    }
+
+    for bad_nibble in [0u8, 5, 15] {
+        let mut bad = [0xAC, 0x02 | (bad_nibble << 4), 0x00, 0x24, 0x00];
+        bad[4] = aegiscall_modem::crc8_atm(&bad[..4]);
+        assert_eq!(PreambleCapabilities::decode_bytes(&bad), None);
+    }
 }
 
 #[test]

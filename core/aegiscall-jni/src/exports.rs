@@ -427,6 +427,24 @@ pub extern "system" fn Java_io_github_h4lovoid_dialcrypt_core_NativeBridge_nativ
 }
 
 #[no_mangle]
+pub extern "system" fn Java_io_github_h4lovoid_dialcrypt_core_NativeBridge_nativeSessionCreateGear<'l>(
+    env: JNIEnv<'l>,
+    _this: JObject<'l>,
+    app: jlong,
+    dial: jboolean,
+    contact_id: jint,
+    peer_e164_utf8: NullableByteArray<'l>,
+    gear_code: jint,
+    now_ms: jlong,
+) -> jlong {
+    (|| {
+        let e164 = opt_bytes(&env, &peer_e164_utf8, MAX_PHONE_LEN)?;
+        bridge().session_create_gear(app, flag(dial), contact_id, slice(&e164), gear_code, now_ms)
+    })()
+    .unwrap_or(0)
+}
+
+#[no_mangle]
 pub extern "system" fn Java_io_github_h4lovoid_dialcrypt_core_NativeBridge_nativeSessionTxPcm<'l>(
     env: JNIEnv<'l>,
     _this: JObject<'l>,

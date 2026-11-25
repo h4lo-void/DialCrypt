@@ -394,3 +394,363 @@ pub fn apply_codec_channel(pcm: &[i16], p: &CodecChannelProfile) -> Vec<i16> {
         .collect()
 }
 
+/// Resamples `pcm` to simulate sample-clock offset `skew_ppm` (positive = sender clock faster than
+/// receiver clock, so `N` sender samples compress into `N / (1 + skew_ppm * 1e-6)` receiver samples).
+pub fn apply_clock_skew(pcm: &[i16], skew_ppm: f32) -> Vec<i16> {
+    if pcm.is_empty() || !skew_ppm.is_finite() {
+        return pcm.to_vec();
+    }
+    let step = (1.0 + (skew_ppm as f64) * 1e-6).clamp(0.95, 1.05);
+    let out_len = ((pcm.len() as f64) / step).round().max(1.0) as usize;
+    crate::demodulator::resample_farrow_i16(pcm, 0.0, step, out_len)
+}
+
+/// Simulates VoLTE/VoWiFi NetEq jitter-buffer time-scale modifications (random 20 ms frame drops
+/// or smooth cross-faded 20 ms frame duplications) with probability `edit_prob` per frame.
+pub fn apply_jitter_time_scale(pcm: &[i16], edit_prob: f32, seed: u64) -> Vec<i16> {
+    if pcm.is_empty() || edit_prob <= 0.0 {
+        return pcm.to_vec();
+    }
+    let mut rng = XorShift64(seed ^ 0x4E65_7445_715F_2026);
+    let mut out = Vec::with_capacity(pcm.len() + FRAME_SAMPLES * 4);
+    for frame in pcm.chunks(FRAME_SAMPLES) {
+        let u = rng.next_f32();
+        if u < edit_prob * 0.5 && frame.len() == FRAME_SAMPLES {
+            // NetEq time-compression: drop one 20 ms frame
+            continue;
+        } else if u < edit_prob && frame.len() == FRAME_SAMPLES {
+            // NetEq PLC/WSOLA expansion: duplicate one 20 ms frame with 2 ms edge cross-fade
+            out.extend_from_slice(frame);
+            let mut dup = frame.to_vec();
+            for k in 0..32 {
+                let w = k as f32 / 32.0;
+                dup[k] = ((1.0 - w) * frame[FRAME_SAMPLES - 32 + k] as f32 + w * frame[k] as f32)
+                    .round()
+                    .clamp(-32_768.0, 32_767.0) as i16;
+            }
+            out.extend_from_slice(&dup);
+        } else {
+            out.extend_from_slice(frame);
+        }
+    }
+    out
+}
+
+/// Time-domain 3GPP AMR-WB / EVS ACELP (Algebraic Code-Excited Linear Prediction) vocoder simulator.
+/// Models real cellular voice coding constraints:
+/// 1. Pre-emphasis $H_{\text{pre}}(z) = 1 - 0.68 z^{-1}$ & telecom bandpass;
+/// 2. 20 ms 16th-order Levinson-Durbin Linear Predictive Coding (LPC) all-pole vocal-tract envelope;
+/// 3. Four 5 ms (80-sample) subframes with closed-loop fractional/integer pitch adaptive codebook;
+/// 4. Sparse algebraic fixed-codebook signed-pulse search (`pulses_per_subframe` pulses per 5 ms);
+/// 5. Voice Activity Detection (VAD) / Discontinuous Transmission (DTX) comfort-noise replacement;
+/// 6. 16th-order all-pole synthesis filter $1 / A(z)$ + de-emphasis $1 / (1 - 0.68 z^{-1})$.
+#[derive(Debug, Clone, Copy)]
+pub struct AcelpChannelProfile {
+    pub wideband: bool,
+    /// Number of signed algebraic innovation pulses per 5 ms (80-sample) subframe:
+    /// 2 = AMR-WB 6.60 kbps, 8 = AMR-WB 12.65 kbps, 16 = EVS 24.4 kbps.
+    pub pulses_per_subframe: usize,
+    /// Quantization step count for pitch and algebraic codebook gains.
+    pub gain_quant_levels: u16,
+    /// Enable VAD/DTX comfort-noise substitution on low-energy or stationary tonal frames.
+    pub dtx_enabled: bool,
+    /// Random 20 ms RTP frame erasure rate (concealed via damped pitch-lag PLC).
+    pub frame_erasure_prob: f32,
+    pub cfo_hz: f32,
+    pub seed: u64,
+}
+
+impl AcelpChannelProfile {
+    /// Harsh low-rate AMR-WB 6.60 kbps mode (only 2 pulses per 5 ms subframe).
+    pub fn amr_wb_6k60() -> Self {
+        Self {
+            wideband: true,
+            pulses_per_subframe: 2,
+            gain_quant_levels: 32,
+            dtx_enabled: true,
+            frame_erasure_prob: 0.03,
+            cfo_hz: 11.5,
+            seed: 0x3650_505F_0660,
+        }
+    }
+
+    /// Standard VoLTE AMR-WB 12.65 kbps mode (8 algebraic pulses per 5 ms subframe).
+    pub fn amr_wb_12k65() -> Self {
+        Self {
+            wideband: true,
+            pulses_per_subframe: 8,
+            gain_quant_levels: 64,
+            dtx_enabled: true,
+            frame_erasure_prob: 0.02,
+            cfo_hz: -14.0,
+            seed: 0x3650_505F_1265,
+        }
+    }
+
+    /// VoLTE/5G NR EVS 24.4 kbps ACELP mode (16 algebraic pulses per 5 ms subframe).
+    pub fn evs_24k4() -> Self {
+        Self {
+            wideband: true,
+            pulses_per_subframe: 16,
+            gain_quant_levels: 128,
+            dtx_enabled: false,
+            frame_erasure_prob: 0.01,
+            cfo_hz: 6.0,
+            seed: 0x3650_505F_2440,
+        }
+    }
+}
+
+fn levinson_durbin_16(frame: &[f32]) -> [f32; 17] {
+    const ORDER: usize = 16;
+    let n = frame.len();
+    let mut windowed = vec![0.0f32; n];
+    for i in 0..n {
+        let w = 0.54 - 0.46 * (2.0 * PI * i as f32 / n.max(1) as f32).cos();
+        windowed[i] = frame[i] * w;
+    }
+    let mut r = [0.0f64; ORDER + 1];
+    for k in 0..=ORDER {
+        let mut s = 0.0f64;
+        for i in k..n {
+            s += (windowed[i] as f64) * (windowed[i - k] as f64);
+        }
+        // 3GPP lag windowing + white-noise floor for unconditional synthesis stability
+        let bw = 0.994f64.powi(k as i32);
+        r[k] = s * bw;
+    }
+    let mut a = [0.0f32; ORDER + 1];
+    a[0] = 1.0;
+    if r[0] <= 1e-10 {
+        return a;
+    }
+    r[0] *= 1.0003;
+
+    let mut a_cur = [0.0f64; ORDER + 1];
+    let mut a_prev = [0.0f64; ORDER + 1];
+    a_cur[0] = 1.0;
+    let mut err = r[0];
+
+    for m in 1..=ORDER {
+        let mut sum = r[m];
+        for i in 1..m {
+            sum += a_cur[i] * r[m - i];
+        }
+        let k_ref = (-sum / err).clamp(-0.985, 0.985);
+        a_prev[..m].copy_from_slice(&a_cur[..m]);
+        a_cur[m] = k_ref;
+        for i in 1..m {
+            a_cur[i] = a_prev[i] + k_ref * a_prev[m - i];
+        }
+        err *= 1.0 - k_ref * k_ref;
+        if err <= 1e-12 {
+            break;
+        }
+    }
+    // Slight bandwidth expansion (gamma = 0.992) prevents sharp pole ringing on multi-tone inputs
+    let mut gamma = 1.0f64;
+    for i in 1..=ORDER {
+        gamma *= 0.992;
+        a[i] = (a_cur[i] * gamma) as f32;
+    }
+    a
+}
+
+/// Runs 16 kHz `pcm` through the time-domain AMR-WB / EVS ACELP vocoder simulator.
+pub fn apply_acelp_channel(pcm: &[i16], profile: &AcelpChannelProfile) -> Vec<i16> {
+    if pcm.is_empty() {
+        return Vec::new();
+    }
+    const ORDER: usize = 16;
+    const SUBFRAME: usize = 80; // 5 ms @ 16 kHz
+    const MAX_LAG: usize = 232; // ~69 Hz min pitch
+    const MIN_LAG: usize = 34;  // ~470 Hz max pitch
+    const PREEMPH: f32 = 0.68;
+
+    let mut rng = XorShift64(profile.seed ^ 0xACE1_9000_2026_0007);
+    let raw: Vec<f32> = pcm.iter().map(|&s| s as f32 / 32_768.0).collect();
+    let bp = apply_bandpass(&raw, profile.wideband);
+    let input = apply_frequency_shift(&bp, profile.cfo_hz);
+
+    // Pre-emphasis H(z) = 1 - 0.68 z^-1
+    let mut pre = vec![0.0f32; input.len()];
+    let mut prev_in = 0.0f32;
+    for (i, &x) in input.iter().enumerate() {
+        pre[i] = x - PREEMPH * prev_in;
+        prev_in = x;
+    }
+
+    let pulses = profile.pulses_per_subframe.clamp(1, 32);
+    let q_levels = profile.gain_quant_levels.max(8) as f32;
+    let mut exc_hist = vec![0.0f32; MAX_LAG + FRAME_SAMPLES];
+    let mut syn_mem = [0.0f32; ORDER];
+    let mut ana_mem = [0.0f32; ORDER];
+    let mut deemph_state = 0.0f32;
+    let mut last_lag = 128usize;
+    let mut out = Vec::with_capacity(pcm.len());
+
+    let num_frames = (pre.len() + FRAME_SAMPLES - 1) / FRAME_SAMPLES;
+    for f in 0..num_frames {
+        let start = f * FRAME_SAMPLES;
+        let end = (start + FRAME_SAMPLES).min(pre.len());
+        let len = end - start;
+        let mut frame = [0.0f32; FRAME_SAMPLES];
+        frame[..len].copy_from_slice(&pre[start..end]);
+
+        let energy: f32 = frame.iter().map(|&v| v * v).sum::<f32>() / FRAME_SAMPLES as f32;
+        if profile.dtx_enabled && energy < 2e-6 {
+            // VAD/DTX inactive frame: comfort noise excitation only
+            for _ in 0..len {
+                let cn = rng.next_normal() * 0.0008;
+                deemph_state = cn + PREEMPH * deemph_state;
+                out.push((deemph_state.clamp(-0.99, 0.99) * 32_767.0).round() as i16);
+            }
+            syn_mem = [0.0; ORDER];
+            ana_mem = [0.0; ORDER];
+            exc_hist.fill(0.0);
+            continue;
+        }
+
+        let a = levinson_durbin_16(&frame);
+
+        // Compute LPC analysis residual r[n] = x[n] + sum_{k=1..16} a[k] * x[n - k]
+        let mut residual = [0.0f32; FRAME_SAMPLES];
+        for n in 0..FRAME_SAMPLES {
+            let mut s = frame[n];
+            for k in 1..=ORDER {
+                let x_prev = if n >= k { frame[n - k] } else { ana_mem[k - 1 - n] };
+                s += a[k] * x_prev;
+            }
+            residual[n] = s;
+        }
+        for k in 0..ORDER {
+            ana_mem[k] = frame[FRAME_SAMPLES - 1 - k];
+        }
+
+        let erased = rng.next_f32() < profile.frame_erasure_prob;
+
+        for sf in 0..4 {
+            let sf_off = sf * SUBFRAME;
+            let target = &residual[sf_off..sf_off + SUBFRAME];
+
+            let mut sub_exc = [0.0f32; SUBFRAME];
+            if erased {
+                // 3GPP PLC: repeat adaptive codebook at last_lag with 0.75 attenuation
+                for n in 0..SUBFRAME {
+                    let src_idx = MAX_LAG + sf_off + n - last_lag;
+                    sub_exc[n] = 0.75 * exc_hist[src_idx];
+                }
+            } else {
+                // 1. Adaptive codebook pitch search over lags [MIN_LAG, MAX_LAG]
+                let mut best_lag = last_lag;
+                let mut best_score = f32::NEG_INFINITY;
+                let mut best_gp = 0.0f32;
+                for lag in MIN_LAG..=MAX_LAG {
+                    let mut dot = 0.0f32;
+                    let mut norm_sq = 1e-9f32;
+                    for n in 0..SUBFRAME {
+                        let cand = if n < lag {
+                            exc_hist[MAX_LAG + sf_off + n - lag]
+                        } else {
+                            // Self-excited pitch extension for lags shorter than subframe (80)
+                            exc_hist[MAX_LAG + sf_off + (n % lag) - lag]
+                        };
+                        dot += target[n] * cand;
+                        norm_sq += cand * cand;
+                    }
+                    if dot > 0.0 {
+                        let score = (dot * dot) / norm_sq;
+                        if score > best_score {
+                            best_score = score;
+                            best_lag = lag;
+                            best_gp = (dot / norm_sq).clamp(0.0, 1.2);
+                        }
+                    }
+                }
+                last_lag = best_lag;
+                let gp_q = ((best_gp / 1.2) * q_levels).round() / q_levels * 1.2;
+
+                let mut rem = [0.0f32; SUBFRAME];
+                for n in 0..SUBFRAME {
+                    let v = if n < best_lag {
+                        exc_hist[MAX_LAG + sf_off + n - best_lag]
+                    } else {
+                        exc_hist[MAX_LAG + sf_off + (n % best_lag) - best_lag]
+                    };
+                    let pred = gp_q * v;
+                    sub_exc[n] = pred;
+                    rem[n] = target[n] - pred;
+                }
+
+                // 2. Interleaved Single-Pulse Permutation (ISPP) algebraic codebook search
+                //    Places `pulses` signed unit impulses across 5 interleaved tracks.
+                let mut fixed_cb = [0.0f32; SUBFRAME];
+                let mut used = [false; SUBFRAME];
+                for p_idx in 0..pulses {
+                    let track = p_idx % 5;
+                    let mut best_pos = track;
+                    let mut best_abs = -1.0f32;
+                    let mut pos = track;
+                    while pos < SUBFRAME {
+                        if !used[pos] && rem[pos].abs() > best_abs {
+                            best_abs = rem[pos].abs();
+                            best_pos = pos;
+                        }
+                        pos += 5;
+                    }
+                    used[best_pos] = true;
+                    fixed_cb[best_pos] = if rem[best_pos] >= 0.0 { 1.0 } else { -1.0 };
+                }
+
+                let mut num = 0.0f32;
+                let mut den = 1e-9f32;
+                for n in 0..SUBFRAME {
+                    num += rem[n] * fixed_cb[n];
+                    den += fixed_cb[n] * fixed_cb[n];
+                }
+                let gc_raw = (num / den).max(0.0);
+                // Logarithmic gain quantization modeling 3GPP 6..7-bit gain codebook
+                let gc_q = if gc_raw > 1e-6 {
+                    let db = (20.0 * gc_raw.log10()).clamp(-80.0, 6.0);
+                    let db_q = ((db + 80.0) / 86.0 * q_levels).round() / q_levels * 86.0 - 80.0;
+                    10.0f32.powf(db_q / 20.0)
+                } else {
+                    0.0
+                };
+
+                for n in 0..SUBFRAME {
+                    sub_exc[n] += gc_q * fixed_cb[n];
+                }
+            }
+
+            exc_hist[MAX_LAG + sf_off..MAX_LAG + sf_off + SUBFRAME].copy_from_slice(&sub_exc);
+
+            // 3. All-pole LPC synthesis 1 / A(z) + De-emphasis 1 / (1 - 0.68 z^-1)
+            for n in 0..SUBFRAME {
+                let global_n = sf_off + n;
+                if global_n >= len {
+                    break;
+                }
+                let mut syn = sub_exc[n];
+                for k in 1..=ORDER {
+                    syn -= a[k] * syn_mem[k - 1];
+                }
+                syn = syn.clamp(-2.0, 2.0);
+                for k in (1..ORDER).rev() {
+                    syn_mem[k] = syn_mem[k - 1];
+                }
+                syn_mem[0] = syn;
+
+                deemph_state = (syn + PREEMPH * deemph_state).clamp(-0.99, 0.99);
+                let noisy = (deemph_state + rng.next_normal() * 0.0004).clamp(-0.99, 0.99);
+                out.push((noisy * 32_767.0).round() as i16);
+            }
+        }
+
+        // Shift adaptive-codebook history buffer back by 320 samples
+        exc_hist.copy_within(FRAME_SAMPLES..MAX_LAG + FRAME_SAMPLES, 0);
+    }
+
+    out
+}
+

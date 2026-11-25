@@ -482,3 +482,17 @@ pub(crate) fn run_until(a: &mut Party, b: &mut Party, now: &mut i64, max: usize,
     }
     cond(a, b)
 }
+
+#[test]
+fn session_create_gear_accepts_every_wire_gear() {
+    let b = Bridge::new();
+    let mut d = Device::new();
+    let app = d.setup(&b);
+    for gear in 1..=4 {
+        let s = b.session_create_gear(app, true, 0, None, gear, 1_000).expect("session_create_gear");
+        assert_eq!(b.session_close(s, false), OK);
+    }
+    assert_eq!(b.session_create_gear(app, true, 0, None, 0, 1_000), Err(BAD_ARG));
+    assert_eq!(b.session_create_gear(app, true, 0, None, 9, 1_000), Err(BAD_ARG));
+    assert_eq!(b.app_close(app), OK);
+}

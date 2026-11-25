@@ -476,9 +476,14 @@ internal class SessionEngine(
                 val h = if (app == 0L || !host.unlocked) {
                     0L
                 } else {
-                    val wide = WIDEBAND && !FieldTest.narrowGear()
-                    if (!wide) Log.i(TAG, "gear=narrow")
-                    NativeBridge.nativeSessionCreate(app, c.dial, nativeContact(c.contactId), e164(c.number), wide, now())
+                    val gearCode = FieldTest.gearOverride()
+                        ?: if (!WIDEBAND) 1 else io.github.h4lovoid.dialcrypt.core.SharedPrefsUiPreferences.readModemMode(context).wireCode
+                    Log.i(TAG, "gear=$gearCode")
+                    if (gearCode == 1 || gearCode == 2) {
+                        NativeBridge.nativeSessionCreate(app, c.dial, nativeContact(c.contactId), e164(c.number), gearCode == 2, now())
+                    } else {
+                        NativeBridge.nativeSessionCreateGear(app, c.dial, nativeContact(c.contactId), e164(c.number), gearCode, now())
+                    }
                 }
                 Log.i(TAG, "session create ok=" + if (h != 0L) 1 else 0)
                 if (h == 0L) {

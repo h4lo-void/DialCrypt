@@ -174,6 +174,16 @@ object NativeBridge {
         nowMs: Long,
     ): Long
 
+    /** Like [nativeSessionCreate], selecting wire gear `1` (NB1200), `2` (WB2400), `3` (Robust300), or `4` (Speech300). */
+    external fun nativeSessionCreateGear(
+        app: Long,
+        dial: Boolean,
+        contactId: Int,
+        peerE164Utf8: ByteArray?,
+        gearCode: Int,
+        nowMs: Long,
+    ): Long
+
     /** PCM for the next slot; empty = voice window (send the microphone), null = session over. */
     external fun nativeSessionTxPcm(session: Long, nowMs: Long): ShortArray?
 

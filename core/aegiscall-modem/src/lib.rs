@@ -7,11 +7,17 @@ pub mod modulator;
 pub mod preamble;
 pub mod speech;
 
-pub use channel_sim::{apply_channel_impairments, apply_codec_channel, ChannelProfile, CodecChannelProfile};
-pub use demodulator::{DemodLinkMetrics, FormantDemodulator};
+pub use channel_sim::{
+    apply_acelp_channel, apply_channel_impairments, apply_clock_skew, apply_codec_channel,
+    apply_jitter_time_scale, AcelpChannelProfile, ChannelProfile, CodecChannelProfile,
+};
+pub use demodulator::{
+    farrow_cubic_sample, resample_farrow_i16, DemodLinkMetrics, FormantDemodulator, MAX_CLOCK_SKEW_PPM,
+};
 pub use fec::{
     crc16_ccitt, crc8_atm, decode_superframe_fec_soft, deinterleave_384_soft,
-    encode_superframe_fec, interleave_384, CODED_BITS, SUPERFRAME_BYTES,
+    deinterleave_superframe_group_soft, encode_superframe_fec, interleave_384,
+    interleave_superframe_group, CODED_BITS, SUPERFRAME_BYTES,
 };
 pub use modulator::{FormantModulator, ModemGear, FRAME_SAMPLES, SAMPLE_RATE};
 pub use preamble::{
@@ -20,9 +26,9 @@ pub use preamble::{
     TOTAL_PREAMBLE_SAMPLES,
 };
 pub use speech::{
-    analyze_stealth_metrics, detect_speech_preamble_raw, frame_f0_hz, frame_pitch_scale,
-    synthesize_comfort_noise, synthesize_speech_preamble, SpeechStealthMetrics, VoiceTimbre,
-    VowelGlideCorrelator,
+    analyze_stealth_metrics, detect_speech_preamble_raw, estimate_frame_pitch_scale, frame_f0_hz,
+    frame_pitch_scale, synthesize_comfort_noise, synthesize_speech_preamble, SpeechStealthMetrics,
+    VoiceTimbre, VowelGlideCorrelator,
 };
 
 #[cfg(test)]
