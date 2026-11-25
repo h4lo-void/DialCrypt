@@ -186,7 +186,7 @@ fn ipc_decoder_accepts_only_exact_client_messages_and_bounds_frames() {
             let mut body = vec![ty];
             body.extend(std::iter::repeat(0xabu8).take(len));
             let ok = decode_client(&body).is_ok();
-            let expect = matches!((ty, len), (1, 1) | (2, 0) | (6, 16) | (8, 16) | (10, 0));
+            let expect = matches!((ty, len), (1, 1) | (2, 0) | (6, 16) | (8, 16) | (10, 0) | (12, 0));
             assert_eq!(ok, expect, "type {ty} payload {len}");
         }
     }
@@ -254,6 +254,8 @@ fn fw_cfg() -> FwConfig {
         pcscf: ["10.0.0.10", "0.0.0.0", "127.0.0.1", "224.0.0.1", "255.255.255.255", "2607:fb90:1::10", "::", "::1", "ff02::1"].iter().map(|s| a(*s)).collect(),
         media: ["10.9.9.1", "10.9.9.2", "10.9.9.3", "10.9.9.4", "2607:fb90:9::9", "239.1.1.1"].iter().map(|s| a(*s)).collect(),
         nflog: true,
+        wlan_iface: None,
+        epdg: Vec::new(),
     }
 }
 

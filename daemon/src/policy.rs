@@ -11,7 +11,10 @@
 //! `test_allow_profile_owner` (0/1, default 0; test devices only: the precheck
 //! accepts a work profile. A device owner is refused in every case).
 
+use std::net::IpAddr;
+
 use crate::codes::Code;
+use crate::firewall::usable_addr;
 use crate::sysops::{read_text, SysError, SysOps};
 use crate::valid::{hex_decode32, is_iface_name, is_lower_hex, is_package_name, parse_u32};
 
@@ -27,6 +30,8 @@ pub struct Policy {
     pub avb_keys: Vec<String>,
     pub allowed_ifaces: Vec<String>,
     pub media_learning: bool,
+    pub allow_vowifi: bool,
+    pub epdg_addrs: Vec<IpAddr>,
     pub test_allow_usb_debug: bool,
     pub test_allow_profile_owner: bool,
 }
@@ -42,6 +47,8 @@ impl Default for Policy {
             avb_keys: Vec::new(),
             allowed_ifaces: Vec::new(),
             media_learning: true,
+            allow_vowifi: false,
+            epdg_addrs: Vec::new(),
             test_allow_usb_debug: false,
             test_allow_profile_owner: false,
         }
@@ -110,8 +117,20 @@ impl Policy {
                         p.allowed_ifaces.push(i.to_string());
                     }
                 }
+                "allow_vowifi" => p.allow_vowifi = flag(v)?,
+                "epdg_addrs" => {
+                    for raw_ip in list(v) {
+                        let ip = raw_ip.parse::<IpAddr>().ok().filter(usable_addr).ok_or(Code::PolicyInvalid)?;
+                        if !p.epdg_addrs.contains(&ip) {
+                            p.epdg_addrs.push(ip);
+                        }
+                    }
+                }
                 _ => return Err(Code::PolicyInvalid),
             }
+        }
+        if p.allow_vowifi && p.epdg_addrs.is_empty() {
+            return Err(Code::PolicyInvalid);
         }
         Ok(p)
     }
@@ -148,5 +167,9 @@ mod tests {
         assert_eq!(Policy::parse("test_allow_usb_debug=yes"), Err(Code::PolicyInvalid));
         assert!(!Policy::default().test_allow_profile_owner);
         assert!(matches!(Policy::parse("test_allow_profile_owner=1"), Ok(x) if x.test_allow_profile_owner && !x.test_allow_usb_debug));
+        assert_eq!(Policy::parse("allow_vowifi=1"), Err(Code::PolicyInvalid), "VoWiFi requires pinned epdg_addrs");
+        assert_eq!(Policy::parse("allow_vowifi=1\nepdg_addrs=0.0.0.0"), Err(Code::PolicyInvalid));
+        let vw = Policy::parse("allow_vowifi=1\nepdg_addrs=198.51.100.10, 2001:db8::50\n").expect("valid VoWiFi policy");
+        assert!(vw.allow_vowifi && vw.epdg_addrs.len() == 2);
     }
 }

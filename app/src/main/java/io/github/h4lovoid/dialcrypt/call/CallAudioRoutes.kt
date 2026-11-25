@@ -46,8 +46,8 @@ internal object CallAudioRoutes {
         // can put it first with the route_a switch.
         val interceptionFirst = FieldTestAudio.flag("route_a")
         if (interceptionFirst) Log.w(AUDIO_TAG, "field test: call audio interception first")
-        val capture = { openDownlinkCapture(am, onBeforeReleaseMute, onDataRoute)?.also { Log.i(AUDIO_TAG, "route: voice downlink capture + telephony output") } }
-        val interception = { openInterception(am, onBeforeReleaseMute, onDataRoute)?.also { Log.i(AUDIO_TAG, "route: call audio interception") } }
+        val capture = { openDownlinkCapture(context, am, onBeforeReleaseMute, onDataRoute)?.also { Log.i(AUDIO_TAG, "route: voice downlink capture + telephony output") } }
+        val interception = { openInterception(context, am, onBeforeReleaseMute, onDataRoute)?.also { Log.i(AUDIO_TAG, "route: call audio interception") } }
         val order = if (interceptionFirst) listOf(interception, capture) else listOf(capture, interception)
         for (open in order) open()?.let { return it }
         Log.w(AUDIO_TAG, "route: none available")
@@ -55,6 +55,7 @@ internal object CallAudioRoutes {
     }
 
     private fun openInterception(
+        context: Context,
         am: AudioManager,
         onBeforeReleaseMute: (() -> Boolean)?,
         onDataRoute: ((Boolean) -> Unit)?,
@@ -80,7 +81,7 @@ internal object CallAudioRoutes {
                 release(record, track)
                 return null
             }
-            return start(am, record, track, requireTelephonyRoute = false, label = "interception", onBeforeReleaseMute = onBeforeReleaseMute, onDataRoute = onDataRoute)
+            return start(context, am, record, track, requireTelephonyRoute = false, label = "interception", onBeforeReleaseMute = onBeforeReleaseMute, onDataRoute = onDataRoute)
         } catch (e: Exception) {
             Log.i(AUDIO_TAG, "interception: unavailable (${rootName(e)})")
             release(record, track)
@@ -89,6 +90,7 @@ internal object CallAudioRoutes {
     }
 
     private fun openDownlinkCapture(
+        context: Context,
         am: AudioManager,
         onBeforeReleaseMute: (() -> Boolean)?,
         onDataRoute: ((Boolean) -> Unit)?,
@@ -114,7 +116,7 @@ internal object CallAudioRoutes {
                 release(record, track)
                 return null
             }
-            return start(am, record, track, requireTelephonyRoute = true, label = "downlink capture", onBeforeReleaseMute = onBeforeReleaseMute, onDataRoute = onDataRoute)
+            return start(context, am, record, track, requireTelephonyRoute = true, label = "downlink capture", onBeforeReleaseMute = onBeforeReleaseMute, onDataRoute = onDataRoute)
         } catch (e: Exception) {
             Log.i(AUDIO_TAG, "downlink capture: unavailable (${rootName(e)})")
             release(record, track)
@@ -122,8 +124,9 @@ internal object CallAudioRoutes {
         }
     }
 
-    /** Mutes first, then starts both streams; any refusal undoes everything. */
+    /** Mutes first, then starts both streams and verifies uplink write acceptance; any refusal undoes everything. */
     private fun start(
+        context: Context,
         am: AudioManager,
         record: AudioRecord,
         track: AudioTrack,
@@ -132,7 +135,13 @@ internal object CallAudioRoutes {
         onBeforeReleaseMute: (() -> Boolean)? = null,
         onDataRoute: ((Boolean) -> Unit)? = null,
     ): PcmCallAudio? {
-        val muter = CallAudioMuter(am, FieldTestAudio.flag("no_mic_mute"), FieldTestAudio.flag("no_playback_mute"), muteJournal)
+        val muter = CallAudioMuter(
+            am,
+            FieldTestAudio.flag("no_mic_mute"),
+            FieldTestAudio.flag("no_playback_mute"),
+            muteJournal,
+            context.applicationContext ?: context,
+        )
         if (!muter.engage()) {
             Log.i(AUDIO_TAG, "$label: microphone mute refused")
             release(record, track)
@@ -143,7 +152,8 @@ internal object CallAudioRoutes {
             track.play()
             record.recordingState == AudioRecord.RECORDSTATE_RECORDING &&
                 track.playState == AudioTrack.PLAYSTATE_PLAYING &&
-                (!requireTelephonyRoute || routedToTelephony(track))
+                (!requireTelephonyRoute || routedToTelephony(track)) &&
+                uplinkAcceptsProbe(track)
         } catch (e: Exception) {
             Log.i(AUDIO_TAG, "$label: start refused (${rootName(e)})")
             false
@@ -158,6 +168,14 @@ internal object CallAudioRoutes {
         }
         onDataRoute?.invoke(true)
         return PcmCallAudio(record, track, muter, onBeforeReleaseMute = onBeforeReleaseMute, onDataRoute = onDataRoute)
+    }
+
+    /** Writes one 20 ms silent frame non-blocking to detect HALs where microphone mute stalls uplink playback. */
+    private fun uplinkAcceptsProbe(track: AudioTrack): Boolean {
+        val samples = max(1, track.sampleRate / 50)
+        val silence = ShortArray(samples)
+        val written = track.write(silence, 0, silence.size, AudioTrack.WRITE_NON_BLOCKING)
+        return written >= 0 && track.playState == AudioTrack.PLAYSTATE_PLAYING
     }
 
     /** The track must really land on the uplink; elsewhere the modem tones would be heard locally. */

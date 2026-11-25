@@ -45,7 +45,10 @@ intended behavior, not a fault.
 
 Other keys: `armed=1` makes the daemon really change the system,
 `dedicated_mode=1` enables tier 2 (only after device verification),
-`ims_uids`, `magisk_pkg`, `avb_keys`, `allowed_ifaces`, `media_learning`.
+`ims_uids`, `magisk_pkg`, `avb_keys`, `allowed_ifaces`, `media_learning`,
+`allow_vowifi=1` with `epdg_addrs=<comma-separated carrier ePDG IPs>` (keeps
+Wi-Fi enabled solely for IPSec/IKEv2 VoWiFi tunnel traffic on UDP 500/4500 and
+ESP to the pinned carrier ePDG addresses).
 The file must stay root-only (0600); an invalid file means dry run.
 
 Test devices only: `test_allow_usb_debug=1` lets the precheck pass with USB

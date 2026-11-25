@@ -17,12 +17,12 @@ use crate::ipc::{self, ServerMsg};
 use crate::journal::{self, Entry, Header, Kind, Parsed, State, Step, Writer};
 use crate::memscrub;
 use crate::monitor::{kill_candidates, MonState, Monitor, Tier2Watch, Watch};
-use crate::mute_guard::MuteFirewall;
 use crate::peer;
 use crate::precheck::{Context, Tier2Plan};
 use crate::procfs::{self, ProcId};
 use crate::session::{send, ConnId, Output, Phase, RestoreReport, Session};
 use crate::sysops::{Mutation, SysError, SysOps};
+use crate::telephony::Rat;
 use crate::valid::{hex_encode, is_journal_token};
 
 pub const RESTORE_ATTEMPTS: u32 = 3;
@@ -32,9 +32,13 @@ const KILL_WAIT_POLLS: u32 = 30;
 
 /// Tier 1 items with their target values (design 6.7 table).
 /// `keep_usb` (policy `test_allow_usb_debug`) leaves the USB functions as they are.
-pub fn tier1_items(ctx: &Context, keep_usb: bool) -> Vec<Watch> {
+/// `keep_wifi` leaves `wifi` enabled when `allow_vowifi=1` and IMS is over `IWLAN`.
+pub fn tier1_items_opts(ctx: &Context, keep_usb: bool, keep_wifi: bool) -> Vec<Watch> {
     let mut v = Vec::new();
-    for r in ["wifi", "bluetooth", "nfc"] {
+    if !keep_wifi {
+        v.push(Watch::new(Kind::Radio, "wifi", "off"));
+    }
+    for r in ["bluetooth", "nfc"] {
         v.push(Watch::new(Kind::Radio, r, "off"));
     }
     if ctx.uwb {
@@ -106,8 +110,9 @@ impl<S: SysOps> Session<S> {
 
     pub(crate) fn lockdown(&mut self, ctx: &Context, lease: &[u8; 16], launcher: ProcId, conn: ConnId, out: &mut Vec<Output>) -> Result<u8, Failure> {
         let real = self.armed;
+        let keep_wifi = self.policy.allow_vowifi && ctx.ims.rat == Rat::Iwlan;
         // 1. Read every prior value before the first change.
-        let items = tier1_items(ctx, self.policy.test_allow_usb_debug);
+        let items = tier1_items_opts(ctx, self.policy.test_allow_usb_debug, keep_wifi);
         let t2_items = ctx.tier2.as_ref().map(tier2_items).unwrap_or_default();
         let mut priors = Vec::new();
         for w in items.iter().chain(t2_items.iter()) {
@@ -128,6 +133,8 @@ impl<S: SysOps> Session<S> {
             pcscf: ctx.ims.pcscf.clone(),
             media: Vec::new(),
             nflog: self.policy.media_learning,
+            wlan_iface: keep_wifi.then(|| "wlan0".to_string()),
+            epdg: if keep_wifi { self.policy.epdg_addrs.clone() } else { Vec::new() },
         };
         for fam in Family::ALL {
             let leftover = real && self.sys.read_cmd(&[fam.iptables(), "-w", "-S"]).map(|t| firewall::mentions_own_chain(&t)).unwrap_or(false);
@@ -175,6 +182,7 @@ impl<S: SysOps> Session<S> {
                 app_uid: self.app_uid.unwrap_or(u32::MAX),
             });
             let mut mon = Monitor::new(watches, ctx.ims.clone(), &self.policy.allowed_ifaces, t2w);
+            mon.set_allow_vowifi(self.policy.allow_vowifi);
             mon.rebaseline(&mut self.sys);
             self.monitor = Some(mon);
             let _ = self.sys.packet_capture(cfg.nflog);
@@ -419,7 +427,6 @@ impl<S: SysOps> Session<S> {
             self.sys.restore_unlock();
             self.lock_held = false;
         }
-        let now = self.sys.now_ms();
         self.phase = Phase::Idle;
         self.ctx = None;
         self.fw = None;
@@ -429,7 +436,7 @@ impl<S: SysOps> Session<S> {
         self.claims = 0;
         self.tier = 0;
         self.app_uid = None;
-        self.mute = MuteFirewall::new(now);
+        self.fail_closed_tripped = false;
     }
 
     /// Restores a journal left by a crashed daemon or a previous boot.

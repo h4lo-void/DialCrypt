@@ -305,8 +305,21 @@ pub fn run<S: SysOps + ?Sized>(sys: &mut S, policy: &Policy, tier2: bool) -> Res
         Err(_) => fail(Item::Ims, Code::VolteOff),
     }
     let ims = match sys.read_cmd(&["dumpsys", "telephony.registry"]) {
-        Ok(t) => match telephony::parse_ims_link(&t) {
+        Ok(t) => match telephony::parse_ims_link_opts(&t, policy.allow_vowifi) {
             Ok(l) => Some(l),
+            Err(Code::ImsNotRegistered) => {
+                let fallback = match (
+                    sys.read_cmd(&["ip", "-o", "addr"]),
+                    sys.read_cmd(&["ip", "route", "show", "table", "all"]),
+                ) {
+                    (Ok(addr), Ok(route)) => telephony::parse_ims_ip_fallback(&addr, &route, policy.allow_vowifi),
+                    _ => None,
+                };
+                if fallback.is_none() {
+                    fail(Item::Ims, Code::ImsNotRegistered);
+                }
+                fallback
+            }
             Err(c) => {
                 fail(Item::Ims, c);
                 None

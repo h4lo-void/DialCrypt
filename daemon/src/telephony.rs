@@ -20,6 +20,7 @@ use crate::valid::{is_iface_name, is_package_name};
 pub enum Rat {
     Lte,
     Nr,
+    Iwlan,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -95,6 +96,12 @@ fn connections(line: &str) -> Vec<&str> {
 
 /// Finds the connected IMS data connection (design 6.7 "address sources").
 pub fn parse_ims_link(text: &str) -> Result<ImsLink, Code> {
+    parse_ims_link_opts(text, false)
+}
+
+/// Finds the connected IMS data connection, optionally allowing IWLAN (VoWiFi)
+/// when `allow_vowifi` is enabled in policy with pinned carrier ePDG addresses.
+pub fn parse_ims_link_opts(text: &str, allow_vowifi: bool) -> Result<ImsLink, Code> {
     let mut seen = Code::ImsNotRegistered;
     for line in text.lines().flat_map(connections) {
         if !line.contains("InterfaceName") {
@@ -115,13 +122,24 @@ pub fn parse_ims_link(text: &str) -> Result<ImsLink, Code> {
         if types.iter().any(|t| t == "default" || t == "internet") || line.contains("INTERNET") {
             return Err(Code::ImsOnInternetApn);
         }
-        if field(line, &["transportType", "transport"]) != Some("WWAN") {
-            seen = Code::ImsNotOnLteNr;
-            continue;
-        }
-        let rat = match field(line, &["network type", "networkType"]) {
-            Some("LTE") | Some("LTE_CA") => Rat::Lte,
-            Some("NR") => Rat::Nr,
+        let transport = field(line, &["transportType", "transport"]);
+        let net_type = field(line, &["network type", "networkType"]);
+        let rat = match transport {
+            Some("WWAN") => match net_type {
+                Some("LTE") | Some("LTE_CA") => Rat::Lte,
+                Some("NR") => Rat::Nr,
+                _ => {
+                    seen = Code::ImsNotOnLteNr;
+                    continue;
+                }
+            },
+            Some("IWLAN") if allow_vowifi => match net_type {
+                Some("IWLAN") | Some("LTE") | Some("LTE_CA") | Some("NR") | Some("UNKNOWN") | None => Rat::Iwlan,
+                _ => {
+                    seen = Code::ImsNotOnLteNr;
+                    continue;
+                }
+            },
             _ => {
                 seen = Code::ImsNotOnLteNr;
                 continue;
@@ -140,6 +158,77 @@ pub fn parse_ims_link(text: &str) -> Result<ImsLink, Code> {
     Err(seen)
 }
 
+/// Fallback IMS interface and gateway resolver from `ip -o addr` and
+/// `ip route show table all` when `dumpsys telephony.registry` omits
+/// `mPreciseDataConnectionStates` details on newer Android builds.
+pub fn parse_ims_ip_fallback(ip_addr_text: &str, ip_route_text: &str, allow_vowifi: bool) -> Option<ImsLink> {
+    let mut main_default_ifaces = BTreeSet::new();
+    for line in ip_route_text.lines().map(str::trim) {
+        if line.starts_with("default ") && (!line.contains(" table ") || line.contains(" table main")) {
+            let words: Vec<&str> = line.split_whitespace().collect();
+            for w in words.windows(2) {
+                if w[0] == "dev" && is_iface_name(w[1]) {
+                    main_default_ifaces.insert(w[1].to_string());
+                }
+            }
+        }
+    }
+
+    let mut candidates: Vec<(String, Rat)> = Vec::new();
+    for line in ip_addr_text.lines() {
+        let words: Vec<&str> = line.split_whitespace().collect();
+        if words.len() < 4 {
+            continue;
+        }
+        let iface = words[1].trim_end_matches(':');
+        if !is_iface_name(iface) || main_default_ifaces.contains(iface) {
+            continue;
+        }
+        let rat = if allow_vowifi && iface.starts_with("ipsec") {
+            Rat::Iwlan
+        } else if iface.starts_with("rmnet") || iface.starts_with("v4-rmnet") || iface.starts_with("ccmni") {
+            Rat::Lte
+        } else {
+            continue;
+        };
+        if !candidates.iter().any(|(i, _)| i == iface) {
+            candidates.push((iface.to_string(), rat));
+        }
+    }
+
+    for (iface, rat) in candidates {
+        let mut pcscf: Vec<IpAddr> = Vec::new();
+        for line in ip_route_text.lines().map(str::trim) {
+            let words: Vec<&str> = line.split_whitespace().collect();
+            let on_iface = words.windows(2).any(|w| w[0] == "dev" && w[1] == iface);
+            if !on_iface || words.contains(&"local") || words.contains(&"proto") && words.contains(&"kernel") {
+                continue;
+            }
+            for w in words.windows(2) {
+                if w[0] == "via" {
+                    if let Some(ip) = w[1].parse::<IpAddr>().ok().filter(usable_addr) {
+                        if !pcscf.contains(&ip) {
+                            pcscf.push(ip);
+                        }
+                    }
+                }
+            }
+            if let Some(first) = words.first() {
+                let host_str = first.strip_suffix("/32").or_else(|| first.strip_suffix("/128")).unwrap_or(*first);
+                if let Some(ip) = host_str.parse::<IpAddr>().ok().filter(usable_addr) {
+                    if !pcscf.contains(&ip) {
+                        pcscf.push(ip);
+                    }
+                }
+            }
+        }
+        if !pcscf.is_empty() {
+            return Some(ImsLink { iface, pcscf, rat });
+        }
+    }
+    None
+}
+
 /// `mCallState`: 0 idle, 1 ringing, 2 off-hook (dialing or in a call).
 pub fn parse_call_state(text: &str) -> Option<u8> {
     field(text, &["mCallState"])?.parse().ok()
@@ -154,15 +243,16 @@ pub struct CallBearer {
     pub ok: bool,
 }
 
-fn voice_rat_ok(v: &str) -> bool {
+fn voice_rat_ok(v: &str, allow_vowifi: bool) -> bool {
     let name = v.split_once('(').and_then(|(_, r)| r.strip_suffix(')')).unwrap_or(v);
     matches!(name, "LTE" | "LTE_CA" | "NR" | "14" | "19" | "20")
+        || (allow_vowifi && matches!(name, "IWLAN" | "18"))
 }
 
-fn judge_phone(out: &mut CallBearer, state: Option<&str>, rat: Option<&str>, srvcc: Option<&str>) {
+fn judge_phone(out: &mut CallBearer, state: Option<&str>, rat: Option<&str>, srvcc: Option<&str>, allow_vowifi: bool) {
     if state == Some("2") {
         out.in_call = true;
-        if rat.is_some_and(|r| !voice_rat_ok(r)) || matches!(srvcc, Some("0") | Some("1")) {
+        if rat.is_some_and(|r| !voice_rat_ok(r, allow_vowifi)) || matches!(srvcc, Some("0") | Some("1")) {
             out.ok = false;
         }
     }
@@ -179,18 +269,22 @@ fn judge_phone(out: &mut CallBearer, state: Option<&str>, rat: Option<&str>, srv
 /// network types (LTE/NR only, read back every 2 s) and by the IMS data
 /// connection check.
 pub fn parse_call_bearer(text: &str) -> CallBearer {
+    parse_call_bearer_opts(text, false)
+}
+
+pub fn parse_call_bearer_opts(text: &str, allow_vowifi: bool) -> CallBearer {
     let mut out = CallBearer { in_call: false, ok: true };
     let (mut state, mut rat, mut srvcc): (Option<&str>, Option<&str>, Option<&str>) = (None, None, None);
     for line in text.lines() {
         if line.contains("Phone Id=") {
-            judge_phone(&mut out, state, rat, srvcc);
+            judge_phone(&mut out, state, rat, srvcc, allow_vowifi);
             (state, rat, srvcc) = (None, None, None);
         }
         state = state.or_else(|| field(line, &["mCallState"]));
         rat = rat.or_else(|| field(line, &["getRilVoiceRadioTechnology"]));
         srvcc = srvcc.or_else(|| field(line, &["mSrvccState"]));
     }
-    judge_phone(&mut out, state, rat, srvcc);
+    judge_phone(&mut out, state, rat, srvcc, allow_vowifi);
     out
 }
 
@@ -367,5 +461,26 @@ pub(crate) mod tests {
         assert_eq!(parse_ims_service_package("com.shannon.imsservice\n").as_deref(), Some("com.shannon.imsservice"));
         assert_eq!(parse_ims_service_package("ims get-ims-service requires either \"-c\" or \"-d\" to be set.\n"), None);
         assert_eq!(parse_ims_service_package("Returned package: com.shannon.imsservice\n").as_deref(), Some("com.shannon.imsservice"));
+    }
+
+    #[test]
+    fn vowifi_iwlan_and_ip_route_fallback() {
+        let iwlan = REAL_IMS_STATES
+            .replace("transport: WWAN, id: 3", "transport: IWLAN, id: 3")
+            .replace("netId: 101, network type: LTE", "netId: 101, network type: IWLAN")
+            .replace("InterfaceName: rmnet2", "InterfaceName: ipsec0");
+        assert_eq!(parse_ims_link_opts(&iwlan, false), Err(Code::ImsNotOnLteNr));
+        let ok = parse_ims_link_opts(&iwlan, true).expect("IWLAN allowed when VoWiFi policy enabled");
+        assert_eq!((ok.iface.as_str(), ok.rat), ("ipsec0", Rat::Iwlan));
+
+        let call_iwlan = "mCallState=2\n mServiceState={getRilVoiceRadioTechnology=18(IWLAN)}\n";
+        assert!(!parse_call_bearer_opts(call_iwlan, false).ok);
+        assert!(parse_call_bearer_opts(call_iwlan, true).ok);
+
+        let ip_addr = "1: lo    inet 127.0.0.1/8 scope host lo\n5: rmnet1    inet 100.64.0.2/32 scope global rmnet1\n6: rmnet2    inet6 2001:db8:8::5/64 scope global rmnet2\n";
+        let ip_route = "default via 100.64.0.1 dev rmnet1 table main\n2001:db8::1/128 dev rmnet2 table 1029\n";
+        let fb = parse_ims_ip_fallback(ip_addr, ip_route, false).expect("IMS fallback from ip addr/route");
+        assert_eq!(fb.iface, "rmnet2");
+        assert_eq!(fb.pcscf, vec!["2001:db8::1".parse::<IpAddr>().unwrap()]);
     }
 }

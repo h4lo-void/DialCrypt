@@ -1,6 +1,7 @@
 package io.github.h4lovoid.dialcrypt.call
 
 import android.content.Context
+import android.content.Intent
 import android.media.AudioManager
 import androidx.test.core.app.ApplicationProvider
 import org.junit.Assert.assertEquals
@@ -135,6 +136,24 @@ class CallAudioMuterTest {
         CallAudioMuter.recoverOrphan(context, "secure")
         assertTrue(am.isMicrophoneMute)
         assertTrue(j.isFile)
+    }
+
+    @Test
+    fun externalUnmuteBroadcastImmediatelyRemutesWhileEngaged() {
+        val muter = CallAudioMuter(am, journal = journal, context = context)
+        assertTrue(muter.engage())
+        assertTrue(am.isMicrophoneMute)
+
+        am.isMicrophoneMute = false
+        context.sendBroadcast(Intent(AudioManager.ACTION_MICROPHONE_MUTE_CHANGED))
+        shadowOf(android.os.Looper.getMainLooper()).idle()
+        assertTrue("broadcast immediately re-asserts microphone mute", am.isMicrophoneMute)
+
+        muter.release()
+        assertFalse(am.isMicrophoneMute)
+        context.sendBroadcast(Intent(AudioManager.ACTION_MICROPHONE_MUTE_CHANGED))
+        shadowOf(android.os.Looper.getMainLooper()).idle()
+        assertFalse("unregistered after release", am.isMicrophoneMute)
     }
 }
 

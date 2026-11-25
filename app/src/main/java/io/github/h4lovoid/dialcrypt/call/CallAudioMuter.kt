@@ -2,7 +2,10 @@ package io.github.h4lovoid.dialcrypt.call
 
 import android.app.Application
 import android.app.ActivityManager
+import android.content.BroadcastReceiver
 import android.content.Context
+import android.content.Intent
+import android.content.IntentFilter
 import android.media.AudioManager
 import android.os.Build
 import android.util.Log
@@ -37,11 +40,13 @@ internal class CallAudioMuter(
     private val skipMic: Boolean = false,
     private val skipPlayback: Boolean = false,
     private val journal: File? = null,
+    private val context: Context? = null,
 ) {
     private var engaged = false
     private var savedMicMute = false
     private var savedVolume = -1
     private var lastCheckNs = 0L
+    private var muteReceiver: BroadcastReceiver? = null
 
     /** False, with nothing changed, when the microphone mute does not take (fail closed). */
     @Synchronized
@@ -70,7 +75,37 @@ internal class CallAudioMuter(
             release()
             return false
         }
+        registerMuteWatch()
         return true
+    }
+
+    @Synchronized
+    private fun onExternalMuteChange() {
+        if (!engaged || skipMic || micMuted()) return
+        Log.w(AUDIO_TAG, "microphone unmuted via broadcast; muting again")
+        runCatching { am.isMicrophoneMute = true }
+    }
+
+    private fun registerMuteWatch() {
+        val ctx = context ?: return
+        if (skipMic || muteReceiver != null) return
+        val rx = object : BroadcastReceiver() {
+            override fun onReceive(c: Context?, intent: Intent?) {
+                if (intent?.action == AudioManager.ACTION_MICROPHONE_MUTE_CHANGED) {
+                    onExternalMuteChange()
+                }
+            }
+        }
+        val filter = IntentFilter(AudioManager.ACTION_MICROPHONE_MUTE_CHANGED)
+        val ok = runCatching {
+            if (Build.VERSION.SDK_INT >= 33) {
+                ctx.registerReceiver(rx, filter, Context.RECEIVER_NOT_EXPORTED)
+            } else {
+                ctx.registerReceiver(rx, filter)
+            }
+            true
+        }.getOrDefault(false)
+        if (ok) muteReceiver = rx
     }
 
     /** Re-mutes the microphone if the system turned it back on; false when that fails. */
@@ -91,6 +126,10 @@ internal class CallAudioMuter(
     fun release() {
         if (!engaged) return
         engaged = false
+        muteReceiver?.let { rx ->
+            runCatching { context?.unregisterReceiver(rx) }
+        }
+        muteReceiver = null
         if (!skipPlayback) {
             runCatching { am.adjustStreamVolume(AudioManager.STREAM_VOICE_CALL, AudioManager.ADJUST_UNMUTE, 0) }
             if (savedVolume >= 0) runCatching { am.setStreamVolume(AudioManager.STREAM_VOICE_CALL, savedVolume, 0) }
@@ -110,7 +149,7 @@ internal class CallAudioMuter(
     }
 
     companion object {
-        const val CHECK_INTERVAL_NS = 250_000_000L
+        const val CHECK_INTERVAL_NS = 20_000_000L
 
         // Set once this process has looked for a leftover with no call up; a live mute is never older.
         @Volatile

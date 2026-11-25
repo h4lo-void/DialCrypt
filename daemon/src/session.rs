@@ -11,7 +11,6 @@ use crate::firewall::{FwConfig, MediaLearner};
 use crate::ipc::{self, ClientMsg, FrameReader, ServerMsg};
 use crate::journal::{Kind, Writer};
 use crate::monitor::{Finding, Monitor};
-use crate::mute_guard::MuteFirewall;
 use crate::nflog;
 use crate::peer;
 use crate::policy::Policy;
@@ -81,7 +80,7 @@ pub struct Session<S: SysOps> {
     pub(crate) fw: Option<FwConfig>,
     pub(crate) monitor: Option<Monitor>,
     pub(crate) learner: MediaLearner,
-    pub(crate) mute: MuteFirewall,
+    pub(crate) fail_closed_tripped: bool,
     pub(crate) claims: u8,
     pub(crate) tier: u8,
     pub(crate) app_uid: Option<u32>,
@@ -102,8 +101,7 @@ fn fail_msg(f: Failure) -> ServerMsg {
 }
 
 impl<S: SysOps> Session<S> {
-    pub fn new(mut sys: S) -> Self {
-        let now = sys.now_ms();
+    pub fn new(sys: S) -> Self {
         let mut s = Session {
             sys,
             policy: Policy::default(),
@@ -116,7 +114,7 @@ impl<S: SysOps> Session<S> {
             fw: None,
             monitor: None,
             learner: MediaLearner::default(),
-            mute: MuteFirewall::new(now),
+            fail_closed_tripped: false,
             claims: 0,
             tier: 0,
             app_uid: None,
@@ -129,6 +127,19 @@ impl<S: SysOps> Session<S> {
         };
         s.reload_policy();
         s
+    }
+
+    pub fn is_fail_closed_tripped(&self) -> bool {
+        self.fail_closed_tripped
+    }
+
+    /// Marks the session fail-closed and, when armed with an off-hook call,
+    /// immediately terminates the telecom call so unguarded voice cannot leak.
+    pub(crate) fn trip_fail_closed(&mut self) {
+        self.fail_closed_tripped = true;
+        if self.armed && self.monitor.as_ref().and_then(|m| m.call_state) == Some(2) {
+            let _ = self.sys.apply(&Mutation::exec(&["cmd", "telecom", "end-call"]));
+        }
     }
 
     pub fn sys(&self) -> &S {
@@ -216,11 +227,11 @@ impl<S: SysOps> Session<S> {
     }
 
     /// Losing the attached connection means the secure process is gone or
-    /// broken: keep uplink muted and end the session.
+    /// broken: sever any live call and end the session.
     fn after_conn_gone(&mut self, conn: ConnId) {
         if let Phase::Attached { conn: c, secure, .. } = self.phase.clone() {
             if c == conn {
-                self.mute.trip_fail_closed();
+                self.trip_fail_closed();
                 let now = self.sys.now_ms();
                 self.phase = Phase::Ending { conn: None, secure: Some(secure), deadline_ms: now };
             }
@@ -278,6 +289,11 @@ impl<S: SysOps> Session<S> {
             ClientMsg::Attach { lease } => self.on_attach(conn, lease, out),
             ClientMsg::Heartbeat { lease } => self.on_heartbeat(conn, lease, out),
             ClientMsg::End => self.on_end(conn, out),
+            ClientMsg::TrimStorage => {
+                if self.armed {
+                    let _ = self.sys.apply(&Mutation::exec(&["sm", "fstrim"]));
+                }
+            }
         }
     }
 
@@ -412,7 +428,7 @@ impl<S: SysOps> Session<S> {
                     send(out, conn, fail_msg(Failure::new(Item::Attach, Code::ApplyFailed)));
                     self.conns.remove(&conn);
                     out.push(Output::Close { conn });
-                    self.mute.trip_fail_closed();
+                    self.trip_fail_closed();
                     self.finish(None, Some(secure), out);
                     return;
                 }
@@ -429,7 +445,7 @@ impl<S: SysOps> Session<S> {
                 } else {
                     None
                 };
-                self.mute.trip_fail_closed();
+                self.trip_fail_closed();
                 self.finish(None, victim, out);
             }
         }
@@ -456,7 +472,6 @@ impl<S: SysOps> Session<S> {
         let now = self.sys.now_ms();
         match self.phase.clone() {
             Phase::Attached { conn: c, secure, .. } if c == conn => {
-                self.mute.trip_fail_closed();
                 self.phase = Phase::Ending { conn: Some(conn), secure: Some(secure), deadline_ms: now + END_GRACE_MS };
             }
             Phase::Prepared { conn: c, .. } if c == conn => self.finish(Some(conn), None, out),
@@ -464,10 +479,10 @@ impl<S: SysOps> Session<S> {
         }
     }
 
-    /// Fail-closed (design E4): VIOLATION to the App, uplink muted, the
+    /// Fail-closed (design E4): VIOLATION to the App, active call severed, the
     /// offending item switched off again, then the normal end flow.
     pub(crate) fn violation(&mut self, code: Code, reapply: Vec<Mutation>, out: &mut Vec<Output>) {
-        self.mute.trip_fail_closed();
+        self.trip_fail_closed();
         for m in reapply {
             let _ = self.mutate(m);
         }
@@ -521,7 +536,7 @@ impl<S: SysOps> Session<S> {
             }
             Phase::Attached { last_hb_ms, conn, secure, .. } => {
                 if now.saturating_sub(last_hb_ms) > LEASE_TIMEOUT_MS {
-                    self.mute.trip_fail_closed();
+                    self.trip_fail_closed();
                     if self.conns.contains_key(&conn) {
                         send(out, conn, ServerMsg::Violation { code: Code::VioLeaseExpired.as_u16() });
                     }

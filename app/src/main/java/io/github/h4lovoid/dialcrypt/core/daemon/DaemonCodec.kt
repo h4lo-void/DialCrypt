@@ -50,6 +50,7 @@ sealed interface ClientMsg {
         override fun toString() = "Heartbeat"
     }
     object End : ClientMsg
+    object TrimStorage : ClientMsg
 }
 
 /** Messages the daemon sends. */
@@ -92,6 +93,7 @@ object DaemonCodec {
     private const val T_VIOLATION = 9
     private const val T_END = 10
     private const val T_ENDED = 11
+    private const val T_TRIM = 12
 
     private fun frame(type: Int, payload: ByteArray): ByteArray {
         val len = 1 + payload.size
@@ -123,6 +125,7 @@ object DaemonCodec {
         is ClientMsg.Attach -> { requireLease(m.lease); frame(T_ATTACH, m.lease) }
         is ClientMsg.Heartbeat -> { requireLease(m.lease); frame(T_HEARTBEAT, m.lease) }
         ClientMsg.End -> frame(T_END, ByteArray(0))
+        ClientMsg.TrimStorage -> frame(T_TRIM, ByteArray(0))
     }
 
     /** Decodes `type ‖ payload` (a frame without its length prefix). */
@@ -136,6 +139,7 @@ object DaemonCodec {
             T_ATTACH -> ClientMsg.Attach(leaseOf(p))
             T_HEARTBEAT -> ClientMsg.Heartbeat(leaseOf(p))
             T_END -> { need(0); ClientMsg.End }
+            T_TRIM -> { need(0); ClientMsg.TrimStorage }
             else -> throw FrameException(FrameError.UNKNOWN_TYPE)
         }
     }

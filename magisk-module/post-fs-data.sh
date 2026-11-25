@@ -41,4 +41,5 @@ aegis_overlay() {
 if { [ "${KSU:-}" = "true" ] || [ -e /data/adb/ksud ]; } && [ ! -e /data/adb/metamodule ]; then
     aegis_overlay app "$MODDIR/system/priv-app" /system/priv-app
     aegis_overlay perm "$MODDIR/system/etc/permissions" /system/etc/permissions
+    aegis_overlay sysconfig "$MODDIR/system/etc/sysconfig" /system/etc/sysconfig
 fi
