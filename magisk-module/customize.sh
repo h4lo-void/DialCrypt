@@ -23,7 +23,8 @@ case "$aegis_cert" in
   *[!0-9a-f]*) aegis_cert= ;;
 esac
 if [ ${#aegis_cert} -eq 64 ]; then
-  grep -v '^[[:space:]]*app_cert_sha256[[:space:]]*=' "$AEGIS_POLICY" > "$AEGIS_POLICY.new"
+  # The brackets hold a space and a tab.
+  grep -v '^[ 	]*app_cert_sha256[ 	]*=' "$AEGIS_POLICY" > "$AEGIS_POLICY.new"
   printf 'app_cert_sha256=%s\n' "$aegis_cert" >> "$AEGIS_POLICY.new"
   chmod 0600 "$AEGIS_POLICY.new"
   mv -f "$AEGIS_POLICY.new" "$AEGIS_POLICY"

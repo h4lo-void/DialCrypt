@@ -1,10 +1,11 @@
 name: Demo release
 
 # Builds the no-PIN field-test variant with tools/android-build/build.sh on a GitHub runner and
-# publishes the module zip and the APK as a pre-release. Demo only: the vault opens with a PIN
-# built into the app, so the result must never be installed on a phone in real use.
+# publishes the module zip, which also installs the app, as a pre-release. Demo only: the vault
+# opens with a PIN built into the app, so the result must never be installed on a phone in real use.
 #
 # Start it from the Actions tab (Run workflow) or by pushing a tag that starts with "demo-".
+# Publishing a tag that already has a release replaces that release.
 #
 # Signing key: when the repository secrets DEMO_KEYSTORE_B64 (the PKCS12 key store in base64, key
 # alias aegis-test) and DEMO_KEYSTORE_PASS (its password) are set, the build is signed with that
@@ -118,8 +119,7 @@ jobs:
         run: |
           mkdir dist
           cp out/aegischat-module-FIELDTEST.zip dist/
-          cp app/build/outputs/apk/pixelTitan/fieldTest/app-pixelTitan-fieldTest.apk dist/DialCrypt-demo-nopin-fieldtest.apk
-          (cd dist && sha256sum aegischat-module-FIELDTEST.zip DialCrypt-demo-nopin-fieldtest.apk > SHA256SUMS.txt)
+          zip_sha=$(sha256sum dist/aegischat-module-FIELDTEST.zip | cut -c1-64)
           {
             echo "Prebuilt DialCrypt for demonstrating the secure call and chat path without the PIN screens."
             echo
@@ -127,16 +127,17 @@ jobs:
             echo
             echo "**Requirements:** the same as the normal build: a rooted Pixel with Titan M2 and Magisk, on both phones. It does not work on an ordinary phone, because the secure call path needs privileged call-audio permissions that only the module grants."
             echo
-            echo "**Install:** flash aegischat-module-FIELDTEST.zip in Magisk on both phones and reboot. The installer sets app_cert_sha256 in /data/adb/aegischat/policy.conf by itself, so nothing has to be typed in. App signing certificate SHA-256: $CERT_SHA"
+            echo "**Install:** aegischat-module-FIELDTEST.zip is the only file. Flash it in Magisk on both phones and reboot; it installs the app as a privileged system app together with the root helper and sets app_cert_sha256 in /data/adb/aegischat/policy.conf by itself, so nothing has to be typed in. The app cannot be installed as a plain APK: the privileged call-audio permissions are only granted to the app the module installs."
             echo
             echo "$KEY_NOTE"
             echo
-            echo "Built by GitHub Actions from commit $GITHUB_SHA with AEGIS_TEST_NO_PIN=1 and tools/android-build/build.sh (variant pixelTitanFieldTest). This is an automated build that has not been verified on a device. DialCrypt-demo-nopin-fieldtest.apk is the same APK the module installs."
+            echo "Built by GitHub Actions from commit $GITHUB_SHA with AEGIS_TEST_NO_PIN=1 and tools/android-build/build.sh (variant pixelTitanFieldTest). This is an automated build that has not been verified on a device."
             echo
-            echo "SHA-256:"
+            echo "SHA-256 of the zip: $zip_sha"
             echo
-            echo "~~~"
-            cat dist/SHA256SUMS.txt
-            echo "~~~"
+            echo "SHA-256 of the app signing certificate: $CERT_SHA"
           } > "$RUNNER_TEMP/notes.md"
-          gh release create "$RELEASE_TAG" dist/aegischat-module-FIELDTEST.zip dist/DialCrypt-demo-nopin-fieldtest.apk dist/SHA256SUMS.txt --title "DialCrypt no-PIN demo ($RELEASE_TAG)" --notes-file "$RUNNER_TEMP/notes.md" --prerelease --target "$GITHUB_SHA"
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release delete "$RELEASE_TAG" --yes
+          fi
+          gh release create "$RELEASE_TAG" dist/aegischat-module-FIELDTEST.zip --title "DialCrypt no-PIN demo ($RELEASE_TAG)" --notes-file "$RUNNER_TEMP/notes.md" --prerelease --target "$GITHUB_SHA"
