@@ -94,9 +94,9 @@ Android gives apps no counter that survives a restored backup, so an attacker wh
 
 AMR-WB and EVS are built to carry voices: they bend phase, squeeze anything that is not speech, and drop or insert samples in the jitter buffer, while the two phones' audio clocks drift apart. The modem answers each of these. A 400 ms rising-and-falling chirp preamble (600 to 1900 Hz) finds frame timing and estimates carrier offset. A rate-1/2, K=7 convolutional code with soft-decision Viterbi decoding and a 384-bit interleaver absorbs bursts. Each subband is compensated for the channel's tilt, and a clock tracker stretches or shrinks the frame step during the call; the test suite runs it at -116 and -200 ppm of crystal skew with 40-sample buffer jumps.
 
-**3. Data that is shaped like a voice** (`Speech300` in `speech.rs`, lab gear)
+**3. Data that is shaped like a voice** (`Speech300` in `speech.rs`)
 
-A classic modem sends a steady pilot and a mechanical buzz, which is exactly what a speech codec's noise suppressor removes. `Speech300` instead synthesizes its frames as a voice-like waveform: a pitch contour moving between 105 and 152 Hz over seven syllables per superframe, four sentence-stress patterns that repeat only every 5.12 s, glottal-pulse excitation, three formants that glide together, seven classes of consonant onset, and a vowel glide as the preamble. It is implemented and unit-tested in the modem crate and the WAV tool. It is not yet negotiated in calls, and how it holds up on real networks has not been measured.
+A classic modem sends a steady pilot and a mechanical buzz, which is exactly what a speech codec's noise suppressor removes. `Speech300` instead synthesizes its frames as a voice-like waveform: a pitch contour moving between 102 and 156 Hz over seven syllables per superframe with aperiodic multi-phrase prosody, glottal-pulse excitation, three formants that glide together, seven classes of consonant onset, a frame-stateless harmonic comb pitch estimator, and a vowel glide as the preamble. Both `Robust300` and `Speech300` can be selected in Settings for codec-heavy or stealth-oriented calls.
 
 **4. A handshake that ignores caller ID** (`aegiscall-crypto`)
 
@@ -172,8 +172,8 @@ For the full DSP specification, tone codebooks, FEC/interleaver layout, preamble
 |---|---|---|---|---|
 | `Wideband2400` | 2,400 bps | about 1,150 bps | Yes, the default | 12 subbands of 2-of-7 tones in 500 to 6437.5 Hz, meant for wideband VoLTE codecs (AMR-WB, EVS). Superframe of 8 frames, 160 ms |
 | `Narrowband1200` | 1,200 bps | about 575 bps | Yes | 6 subbands of 3-of-6 tones in 500 to 3062.5 Hz, meant to survive narrowband codecs (AMR-NB). Superframe of 16 frames, 320 ms |
-| `Robust300` | 300 bps | about 144 bps | Not yet | 3 subbands of 1-of-4 tones on a 125 Hz grid in 500 to 1875 Hz, built for codec-heavy paths that drop simultaneous tones and attenuate above about 2 kHz. Superframe of 64 frames, 1.28 s |
-| `Speech300` | 300 bps | about 144 bps | Not yet | Carries the data as a synthesized, voice-like waveform (see [Built from scratch](#built-from-scratch), part 3) |
+| `Robust300` | 300 bps | about 144 bps | Yes (selectable) | 3 subbands of 1-of-4 tones on a 125 Hz grid in 500 to 1875 Hz, built for codec-heavy paths that drop simultaneous tones and attenuate above about 2 kHz. Superframe of 64 frames, 1.28 s |
+| `Speech300` | 300 bps | about 144 bps | Yes (selectable) | Carries the data as a synthesized, voice-like waveform (see [Built from scratch](#built-from-scratch), part 3) |
 
 At about 144 bps a channel moves roughly 18 bytes per second. That is enough for short text and quick replies, and it is the reason DialCrypt carries nothing else.
 

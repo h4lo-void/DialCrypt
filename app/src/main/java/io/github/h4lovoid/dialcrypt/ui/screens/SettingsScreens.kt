@@ -46,6 +46,7 @@ import io.github.h4lovoid.dialcrypt.core.AppLanguage
 import io.github.h4lovoid.dialcrypt.core.BiometricState
 import io.github.h4lovoid.dialcrypt.core.LockdownPhase
 import io.github.h4lovoid.dialcrypt.core.LockdownState
+import io.github.h4lovoid.dialcrypt.core.ModemMode
 import io.github.h4lovoid.dialcrypt.ui.components.ActionRow
 import io.github.h4lovoid.dialcrypt.ui.components.Card
 import io.github.h4lovoid.dialcrypt.ui.components.DangerZone
@@ -83,6 +84,8 @@ fun SettingsScreen(
     onIncomingMode: (IncomingMode) -> Unit = {},
     showFullNumbers: Boolean = false,
     onShowFullNumbers: (Boolean) -> Unit = {},
+    modemMode: ModemMode = ModemMode.WIDEBAND,
+    onModemMode: (ModemMode) -> Unit = {},
     phoneApp: PhoneAppSettings? = null,
     onExit: (() -> Unit)? = null,
     biometric: BiometricSettings? = null,
@@ -130,6 +133,24 @@ fun SettingsScreen(
                     showFullNumbers,
                     onShowFullNumbers,
                 )
+            }
+            Card {
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(Space.md)) {
+                    IconTile(Icons.Filled.Phone)
+                    Text(stringResource(R.string.settings_modem_title), style = MaterialTheme.typography.titleMedium)
+                }
+                OptionRow(R.string.modem_mode_wideband, modemMode == ModemMode.WIDEBAND) {
+                    onModemMode(ModemMode.WIDEBAND)
+                }
+                OptionRow(R.string.modem_mode_narrowband, modemMode == ModemMode.NARROWBAND) {
+                    onModemMode(ModemMode.NARROWBAND)
+                }
+                OptionRow(R.string.modem_mode_robust, modemMode == ModemMode.ROBUST_300) {
+                    onModemMode(ModemMode.ROBUST_300)
+                }
+                OptionRow(R.string.modem_mode_speech, modemMode == ModemMode.SPEECH_300) {
+                    onModemMode(ModemMode.SPEECH_300)
+                }
             }
             if (phoneApp != null) PhoneAppSection(phoneApp)
             SectionLabel(stringResource(R.string.settings_pin))

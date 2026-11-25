@@ -78,12 +78,7 @@ impl PreambleCapabilities {
             return None;
         }
         let version = raw[1] & 0x0F;
-        // Robust300 (wire gear 3) is not negotiable yet: peers announcing it are rejected here.
-        let gear = match (raw[1] >> 4) & 0x0F {
-            1 => ModemGear::Narrowband1200,
-            2 => ModemGear::Wideband2400,
-            _ => return None,
-        };
+        let gear = ModemGear::from_wire((raw[1] >> 4) & 0x0F)?;
         let edition_flags = u16::from_be_bytes([raw[2], raw[3]]);
         Some(Self {
             version,

@@ -315,4 +315,16 @@ internal object FieldTest {
         val dir = filesDir() ?: return false
         return File(File(dir, "fieldtest"), "narrowband").exists()
     }
+
+    /** Optional field-test wire gear override (`1` narrowband, `3` robust, `4` speech). */
+    fun gearOverride(): Int? {
+        if (!BuildConfig.FIELD_TEST_LINK_PROBE) return null
+        val ft = File(filesDir() ?: return null, "fieldtest")
+        return when {
+            File(ft, "speech").exists() -> 4
+            File(ft, "robust").exists() -> 3
+            File(ft, "narrowband").exists() -> 1
+            else -> null
+        }
+    }
 }

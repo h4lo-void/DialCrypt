@@ -243,7 +243,7 @@ fn kotlin_externals() -> Vec<Decl> {
 fn exports_match_kotlin_external_funs() {
     let mut rust = rust_exports();
     let mut kotlin = kotlin_externals();
-    assert_eq!(rust.len(), 41);
+    assert_eq!(rust.len(), 42);
     rust.sort();
     kotlin.sort();
     assert_eq!(rust.len(), kotlin.len());
@@ -262,6 +262,7 @@ fn exports_match_kotlin_external_funs() {
             "nativeImportPairing.labelUtf8",
             "nativePinFinish.hmacOut",
             "nativeSessionCreate.peerE164Utf8",
+            "nativeSessionCreateGear.peerE164Utf8",
             "nativeSessionSaveContact.phoneE164Utf8",
             "nativeSessionSignResult.derSig",
         ]

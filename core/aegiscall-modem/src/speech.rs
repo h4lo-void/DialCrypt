@@ -99,7 +99,7 @@ enum ConsonantOnset {
 
 impl ConsonantOnset {
     #[inline]
-    fn for_syllable(sentence_idx: usize, syl_idx: usize) -> Self {
+    fn for_syllable(phrase_idx: usize, syl_idx: usize) -> Self {
         use ConsonantOnset::*;
         const ORDER: [ConsonantOnset; 7] = [
             LiquidGlide,
@@ -110,8 +110,36 @@ impl ConsonantOnset {
             PalatalApproximant,
             GlottalAspiration,
         ];
-        ORDER[(syl_idx + sentence_idx * 3) % 7]
+        let h = phrase_hash(phrase_idx);
+        let rot = ((h >> (syl_idx * 4)) as usize).wrapping_add(syl_idx * 2 + phrase_idx * 3);
+        ORDER[rot % 7]
     }
+}
+
+/// Prosodic cycle length in 1.28 s phrases (1024 phrases = 21.8 minutes, eliminating short loops
+/// while keeping cumulative glottal phase O(1) bounded for arbitrary u32 frame counters).
+const PROSODY_PHRASE_PERIOD: usize = 1024;
+
+#[inline]
+fn phrase_hash(phrase_idx: usize) -> u64 {
+    let mut z = ((phrase_idx % PROSODY_PHRASE_PERIOD) as u64).wrapping_add(0x9E37_79B9_7F4A_7C15);
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    z ^ (z >> 31)
+}
+
+/// Smooth phrase-level pitch register offset (in Hz) in `[-5.0, +5.0] Hz`, zero for phrase 0 and
+/// tapered by `sin(pi * (m + 0.5) / 64)` at phrase boundaries so glottal pitch is C1-continuous.
+#[allow(dead_code)]
+#[inline]
+fn phrase_pitch_register_hz(phrase_idx: usize) -> f32 {
+    let p = phrase_idx % PROSODY_PHRASE_PERIOD;
+    if p == 0 {
+        return 0.0;
+    }
+    let h = phrase_hash(p);
+    let unit = ((h >> 40) as f32 / (1u64 << 24) as f32) * 2.0 - 1.0;
+    unit * 5.0
 }
 
 /// Speaker voice timbre profile for conversational synthesis.
@@ -150,7 +178,9 @@ pub fn syllable_position(frame_in_sf: usize) -> (usize, usize, usize) {
 
 /// Deterministic human fundamental pitch $F_0(m)$ in Hz for frame `frame_idx`.
 /// Smoothly varies across `[105.0, 152.0] Hz` with natural phrase declination, syllable arch,
-/// tonal glide, and a +/-1.6 Hz vibrato of 4 cycles per 1.28 s superframe (about 3.1 Hz).
+/// tonal glide, and 4-cycle vibrato over the 64-frame phrase so any superframe can be acquired
+/// mid-call without knowing the absolute phrase count, while phonetic stress, vowel color,
+/// consonant onsets, and F4 speaker resonance vary across a 1024-phrase (21.8 min) cycle.
 #[inline]
 pub fn frame_f0_hz(frame_idx: usize) -> f32 {
     let m = frame_idx % SPEECH_SUPERFRAME_FRAMES;
@@ -168,15 +198,252 @@ pub fn frame_pitch_scale(frame_idx: usize) -> f32 {
     frame_f0_hz(frame_idx) / 125.0
 }
 
-/// Prefix sum of `frame_pitch_scale(0..m)` so cumulative glottal phase at frame `k` is exact in O(1).
-fn cumulative_pitch_scale(frame_counter: u32) -> f64 {
-    let mut table = [0.0f64; SPEECH_SUPERFRAME_FRAMES + 1];
-    for m in 0..SPEECH_SUPERFRAME_FRAMES {
-        table[m + 1] = table[m] + frame_pitch_scale(m) as f64;
+#[inline]
+fn goertzel_energy(core: &[f32; DFT_WINDOW_SAMPLES], freq_hz: f32) -> f32 {
+    let omega = 2.0 * PI * freq_hz / SAMPLE_RATE as f32;
+    let coeff = 2.0 * omega.cos();
+    let (mut s1, mut s2) = (0.0f32, 0.0f32);
+    for &x in core.iter() {
+        let s0 = x + coeff * s1 - s2;
+        s2 = s1;
+        s1 = s0;
     }
-    let q = (frame_counter as usize) / SPEECH_SUPERFRAME_FRAMES;
-    let r = (frame_counter as usize) % SPEECH_SUPERFRAME_FRAMES;
-    (q as f64) * table[SPEECH_SUPERFRAME_FRAMES] + table[r]
+    (s1 * s1 + s2 * s2 - coeff * s1 * s2).max(0.0)
+}
+
+fn fft1024_power(core: &[f32; DFT_WINDOW_SAMPLES]) -> [f32; 513] {
+    const N: usize = 1024;
+    let mut re = [0.0f32; N];
+    let mut im = [0.0f32; N];
+    re[..DFT_WINDOW_SAMPLES].copy_from_slice(core);
+    let mut j = 0usize;
+    for i in 1..N {
+        let mut bit = N >> 1;
+        while j & bit != 0 {
+            j ^= bit;
+            bit >>= 1;
+        }
+        j |= bit;
+        if i < j {
+            re.swap(i, j);
+        }
+    }
+    let mut len = 2;
+    while len <= N {
+        let ang = -2.0 * PI / len as f32;
+        let (wi, wr) = ang.sin_cos();
+        for start in (0..N).step_by(len) {
+            let (mut cr, mut ci) = (1.0f32, 0.0f32);
+            for k in 0..len / 2 {
+                let a = start + k;
+                let b = a + len / 2;
+                let tr = re[b] * cr - im[b] * ci;
+                let ti = re[b] * ci + im[b] * cr;
+                re[b] = re[a] - tr;
+                im[b] = im[a] - ti;
+                re[a] += tr;
+                im[a] += ti;
+                let ncr = cr * wr - ci * wi;
+                ci = cr * wi + ci * wr;
+                cr = ncr;
+            }
+        }
+        len <<= 1;
+    }
+    let mut pw = [0.0f32; 513];
+    for k in 0..=512 {
+        pw[k] = re[k] * re[k] + im[k] * im[k];
+    }
+    pw
+}
+
+#[inline]
+fn interp_pw(pw: &[f32; 513], freq_hz: f32) -> f32 {
+    if freq_hz <= 0.0 {
+        return 0.0;
+    }
+    let pos = freq_hz * (1024.0 / SAMPLE_RATE as f32);
+    let idx = pos as usize;
+    if idx >= 512 {
+        return pw[512];
+    }
+    let frac = pos - idx as f32;
+    pw[idx] * (1.0 - frac) + pw[idx + 1] * frac
+}
+
+/// Frame-stateless harmonic comb pitch-scale estimator ($\hat{\alpha} \in [0.80, 1.26]$) for `Speech300`.
+/// Recovers $\alpha(m) = F_0(m)/125\text{ Hz}$ directly from a single 16 ms DFT core so VoLTE/VoWiFi
+/// NetEq jitter-buffer 20 ms frame drops or insertions never desynchronize the demodulator's $F_0(t)$ grid.
+pub fn estimate_frame_pitch_scale(core: &[f32; DFT_WINDOW_SAMPLES], cfo_hz: f32) -> f32 {
+    let pw = fft1024_power(core);
+    let cfo = if cfo_hz.is_finite() { cfo_hz.clamp(-60.0, 60.0) } else { 0.0 };
+    let core_energy: f32 = core.iter().map(|&x| x * x).sum();
+    let ref_mag = ((core_energy * 0.5 * DFT_WINDOW_SAMPLES as f32) / 3.2).sqrt().max(1e-5);
+
+    let mut best_alpha = 1.0f32;
+    let mut best_score = f32::NEG_INFINITY;
+    let mut best_bins = [8usize, 16, 24];
+
+    let mag = |hz: f32| -> f32 { interp_pw(&pw, hz).sqrt() };
+
+    // Coarse harmonic comb sweep over [0.80, 1.26] in steps of 0.002 (~0.25 Hz F0 resolution).
+    // Capping voice-bar magnitudes at `0.75 * ref_mag` prevents a strong F1 formant from
+    // masquerading as bin 6 at `(4/3) * alpha` when lower voice-bar harmonics are absent.
+    let mut step_idx = 0;
+    while step_idx <= 230 {
+        let alpha = 0.80 + (step_idx as f32) * 0.002;
+        step_idx += 1;
+
+        let m2 = mag(2.0 * BIN_HZ * alpha + cfo).min(0.65 * ref_mag);
+        let m4 = mag(4.0 * BIN_HZ * alpha + cfo).min(0.75 * ref_mag);
+        let m6 = mag(6.0 * BIN_HZ * alpha + cfo).min(0.75 * ref_mag);
+        let mut score = 0.90 * m2 + 1.00 * m4 + 1.25 * m6;
+
+        let mut cand_bins = [8usize, 16, 24];
+        for b in 0..3 {
+            let base = 8 + b * 8;
+            let mut max_even = 0.0f32;
+            let mut sum_even = 0.0f32;
+            let mut win_bin = base;
+            for &t in &[0usize, 2, 4, 6] {
+                let m = mag((base + t) as f32 * BIN_HZ * alpha + cfo);
+                sum_even += m;
+                if m > max_even {
+                    max_even = m;
+                    win_bin = base + t;
+                }
+            }
+            let other_even = sum_even - max_even;
+            let band_w = if b == 2 { 0.95 } else { 1.0 };
+            score += band_w * (max_even.min(1.35 * ref_mag) - 0.55 * other_even);
+            cand_bins[b] = win_bin;
+        }
+
+        if score > best_score {
+            best_score = score;
+            best_alpha = alpha;
+            best_bins = cand_bins;
+        }
+    }
+
+    // Fine 3-point Goertzel parabolic interpolation around `best_alpha` on the active harmonic bins
+    let eval_comb = |a: f32| -> f32 {
+        let mut s = 0.5 * goertzel_energy(core, 2.0 * BIN_HZ * a + cfo).sqrt()
+            + 0.7 * goertzel_energy(core, 4.0 * BIN_HZ * a + cfo).sqrt()
+            + 1.0 * goertzel_energy(core, 6.0 * BIN_HZ * a + cfo).sqrt();
+        for &bin in &best_bins {
+            s += goertzel_energy(core, bin as f32 * BIN_HZ * a + cfo).sqrt();
+        }
+        s
+    };
+    let delta = 0.002f32;
+    let y_m = eval_comb(best_alpha - delta);
+    let y_0 = eval_comb(best_alpha);
+    let y_p = eval_comb(best_alpha + delta);
+    let denom = y_m - 2.0 * y_0 + y_p;
+    if denom < -1e-9 {
+        let shift = (0.5 * (y_m - y_p) / denom).clamp(-1.0, 1.0) * delta;
+        (best_alpha + shift).clamp(0.80, 1.26)
+    } else {
+        best_alpha.clamp(0.80, 1.26)
+    }
+}
+
+/// Tracks the transmitter's prosodic pitch scale $\alpha(m)$ across VoLTE/VoWiFi NetEq 20 ms
+/// frame drops and duplications using a smoothed 9-lag (`delta in -4..=4`) harmonic comb
+/// correlator over the 64-frame intonation cycle. Preserves bit-exact nominal pitch on
+/// unedited streams (even over lossy CELP/VoWiFi channels) while snapping `*frame_offset`
+/// cleanly whenever jitter-buffer time-scale editing shifts the 20 ms frame stream.
+pub fn track_speech_pitch_scale(
+    core: &[f32; DFT_WINDOW_SAMPLES],
+    cfo_hz: f32,
+    nominal_frame_idx: usize,
+    frame_offset: &mut i32,
+    offset_ema: &mut [f32; 9],
+) -> f32 {
+    let pw = fft1024_power(core);
+    let cfo = if cfo_hz.is_finite() { cfo_hz.clamp(-60.0, 60.0) } else { 0.0 };
+    let mag = |hz: f32| -> f32 { interp_pw(&pw, hz).sqrt() };
+
+    let eval_alpha = |alpha: f32| -> f32 {
+        let vb = 0.65 * mag(2.0 * BIN_HZ * alpha + cfo)
+            + 0.80 * mag(4.0 * BIN_HZ * alpha + cfo)
+            + 1.15 * mag(6.0 * BIN_HZ * alpha + cfo);
+        let mut s = vb;
+        for b in 0..3 {
+            let base = 8 + b * 8;
+            let mut max_e = 0.0f32;
+            let mut sum_e = 0.0f32;
+            for &t in &[0usize, 2, 4, 6] {
+                let m = mag((base + t) as f32 * BIN_HZ * alpha + cfo);
+                sum_e += m;
+                if m > max_e {
+                    max_e = m;
+                }
+            }
+            s += max_e - 0.35 * (sum_e - max_e);
+        }
+        s.max(0.0)
+    };
+
+    let mut fits = [0.0f32; 9];
+    for (idx, d) in (-4i32..=4).enumerate() {
+        let m = (nominal_frame_idx as isize + *frame_offset as isize + d as isize)
+            .rem_euclid(SPEECH_SUPERFRAME_FRAMES as isize) as usize;
+        let f = eval_alpha(frame_pitch_scale(m));
+        fits[idx] = f;
+        offset_ema[idx] = 0.80 * offset_ema[idx] + 0.20 * f;
+    }
+
+    let mut best_idx = 4usize;
+    for i in 0..9 {
+        if offset_ema[i] > offset_ema[best_idx] {
+            best_idx = i;
+        }
+    }
+
+    if best_idx != 4 && offset_ema[best_idx] > offset_ema[4] * 1.14 && fits[best_idx] > 1e-4 {
+        let shift = (best_idx as i32) - 4;
+        *frame_offset = (*frame_offset + shift).rem_euclid(SPEECH_SUPERFRAME_FRAMES as i32);
+        *offset_ema = [0.0; 9];
+    }
+
+    let cur_m = (nominal_frame_idx as isize + *frame_offset as isize)
+        .rem_euclid(SPEECH_SUPERFRAME_FRAMES as isize) as usize;
+    frame_pitch_scale(cur_m)
+}
+
+/// Prefix sum of `frame_pitch_scale(0..frame_counter)` in O(1) bounded work across the 1024-phrase cycle.
+fn cumulative_pitch_scale(frame_counter: u32) -> f64 {
+    let phrase_sum = |p: usize| -> f64 {
+        let base = p * SPEECH_SUPERFRAME_FRAMES;
+        let mut s = 0.0f64;
+        for m in 0..SPEECH_SUPERFRAME_FRAMES {
+            s += frame_pitch_scale(base + m) as f64;
+        }
+        s
+    };
+    let total_phrases = (frame_counter as usize) / SPEECH_SUPERFRAME_FRAMES;
+    let rem_frames = (frame_counter as usize) % SPEECH_SUPERFRAME_FRAMES;
+    let full_cycles = total_phrases / PROSODY_PHRASE_PERIOD;
+    let rem_phrases = total_phrases % PROSODY_PHRASE_PERIOD;
+
+    let mut acc = 0.0f64;
+    if full_cycles > 0 {
+        let mut cycle_total = 0.0f64;
+        for p in 0..PROSODY_PHRASE_PERIOD {
+            cycle_total += phrase_sum(p);
+        }
+        acc += (full_cycles as f64) * cycle_total;
+    }
+    for p in 0..rem_phrases {
+        acc += phrase_sum(p);
+    }
+    let cur_base = rem_phrases * SPEECH_SUPERFRAME_FRAMES;
+    for m in 0..rem_frames {
+        acc += frame_pitch_scale(cur_base + m) as f64;
+    }
+    acc
 }
 
 /// Exact starting phase of bin `bin` at sample 0 of `frame_counter`, maintaining 100% phase
@@ -195,13 +462,15 @@ pub fn glottal_continuous_phase(bin: usize, frame_counter: u32) -> f32 {
 /// distinct sentence rhythm and stress contours.
 #[inline]
 pub fn syllable_envelope(frame_counter: usize, sample_in_frame: usize) -> f32 {
-    let sentence_idx = (frame_counter / SPEECH_SUPERFRAME_FRAMES) % 4;
+    let phrase_idx = (frame_counter / SPEECH_SUPERFRAME_FRAMES) % PROSODY_PHRASE_PERIOD;
+    let h = phrase_hash(phrase_idx);
+    let sentence_idx = if phrase_idx < 4 { phrase_idx } else { (h & 3) as usize };
     let m = frame_counter % SPEECH_SUPERFRAME_FRAMES;
     let (s, pos, len) = syllable_position(m);
     let u = (pos as f32 + (sample_in_frame as f32 / FRAME_SAMPLES as f32)) / (len as f32);
 
     // Consonant-dependent onset attack speed (plosives/liquids have crisper attack than fricatives)
-    let onset_end = match ConsonantOnset::for_syllable(sentence_idx, s) {
+    let onset_end = match ConsonantOnset::for_syllable(phrase_idx, s) {
         ConsonantOnset::PlosiveBurst => 0.16,
         ConsonantOnset::NasalMurmur | ConsonantOnset::LiquidGlide => 0.20,
         _ => 0.25,
@@ -219,8 +488,14 @@ pub fn syllable_envelope(frame_counter: usize, sample_in_frame: usize) -> f32 {
         1.0 - 0.48 * (0.5 * (1.0 - (PI * t).cos()))
     };
 
-    let stress = SENTENCE_STRESS_TABLE[sentence_idx][s];
-    (shape * stress).clamp(0.45, 1.22)
+    let micro_stress = if phrase_idx == 0 {
+        1.0
+    } else {
+        let bits = ((h >> (8 + s * 6)) & 0x3F) as f32 / 63.0;
+        0.94 + 0.12 * bits
+    };
+    let stress = SENTENCE_STRESS_TABLE[sentence_idx][s] * micro_stress;
+    (shape * stress).clamp(0.45, 1.24)
 }
 
 /// Deterministic pseudo-random sample in `[-1.0, 1.0]` for consonant aspiration bursts.
@@ -256,16 +531,17 @@ pub fn modulate_speech_frame_with_timbre(
     let bpb = gear.bits_per_band();
     debug_assert_eq!(bits.len(), bands * bpb);
 
-    let sentence_idx = ((frame_counter as usize) / SPEECH_SUPERFRAME_FRAMES) % 4;
+    let phrase_idx = ((frame_counter as usize) / SPEECH_SUPERFRAME_FRAMES) % PROSODY_PHRASE_PERIOD;
+    let h_phrase = phrase_hash(phrase_idx);
     let m = (frame_counter as usize) % SPEECH_SUPERFRAME_FRAMES;
     let (syl_idx, pos_in_syl, syl_len) = syllable_position(m);
-    let onset_kind = ConsonantOnset::for_syllable(sentence_idx, syl_idx);
+    let onset_kind = ConsonantOnset::for_syllable(phrase_idx, syl_idx);
 
-    let alpha = frame_pitch_scale(m);
+    let alpha = frame_pitch_scale(frame_counter as usize);
     let prev_alpha = if frame_counter == 0 {
         alpha
     } else {
-        frame_pitch_scale((frame_counter as usize - 1) % SPEECH_SUPERFRAME_FRAMES)
+        frame_pitch_scale(frame_counter as usize - 1)
     };
 
     let mut accum = [0.0f32; FRAME_SAMPLES];
@@ -315,7 +591,12 @@ pub fn modulate_speech_frame_with_timbre(
 
     // 2. Three Vocal-Tract Formants (F1, F2, F3) with dynamic vowel-color tilt, FOF glottal
     //    pulse shaping, and 32-sample inter-frame coarticulation.
-    let vowel_tilt = VOWEL_COLOR_TILT[(syl_idx + sentence_idx) % 4];
+    let vowel_idx = if phrase_idx == 0 {
+        syl_idx % 4
+    } else {
+        (syl_idx + ((h_phrase >> (syl_idx * 3)) as usize)) % 4
+    };
+    let vowel_tilt = VOWEL_COLOR_TILT[vowel_idx];
     for b in 0..bands {
         let mut sym = 0usize;
         for q in 0..bpb {
@@ -381,7 +662,7 @@ pub fn modulate_speech_frame_with_timbre(
         VoiceTimbre::MaleBaritone => 38,     // ~2375..2625 Hz
         VoiceTimbre::FemaleContralto => 42,  // ~2625..2875 Hz
     };
-    let f4_bin = f4_base + ((syl_idx + sentence_idx) % 3) * 2;
+    let f4_bin = f4_base + ((syl_idx + (h_phrase as usize)) % 3) * 2;
     let omega_f4 = 2.0 * PI * (f4_bin as f32 * BIN_HZ * alpha) / SAMPLE_RATE as f32;
     let ph_f4 = glottal_continuous_phase(f4_bin, frame_counter);
     let mut breath_lp = 0.0f32;

@@ -1,13 +1,22 @@
 //! Independent acceptance tests for the Robust300 gear and the demodulator compensation (C4, C5 probe, C7).
 
 use aegiscall_modem::{
-    apply_channel_impairments, apply_codec_channel, decode_superframe_fec_soft, deinterleave_384_soft,
-    detect_preamble, detect_preamble_raw, encode_superframe_fec, interleave_384, synthesize_preamble,
+    apply_acelp_channel, apply_channel_impairments, apply_clock_skew, apply_codec_channel,
+    apply_jitter_time_scale, decode_superframe_fec_soft, deinterleave_384_soft,
+    deinterleave_superframe_group_soft, detect_preamble, detect_preamble_raw, encode_superframe_fec,
+    interleave_384, interleave_superframe_group, synthesize_preamble, AcelpChannelProfile,
     ChannelProfile, CodecChannelProfile, FormantDemodulator, FormantModulator, ModemGear,
     PreambleCapabilities, FRAME_SAMPLES, SUPERFRAME_BYTES, TOTAL_PREAMBLE_SAMPLES,
 };
 
-const GEARS: [ModemGear; 3] = [ModemGear::Narrowband1200, ModemGear::Wideband2400, ModemGear::Robust300];
+const SUPERFRAME_BITS: usize = 384;
+
+const GEARS: [ModemGear; 4] = [
+    ModemGear::Narrowband1200,
+    ModemGear::Wideband2400,
+    ModemGear::Robust300,
+    ModemGear::Speech300,
+];
 
 struct Lcg(u64);
 impl Lcg {
@@ -84,7 +93,13 @@ fn c4_wrong_gear_never_yields_the_payload() {
         let blocks: Vec<_> = (0..16).map(|_| rng.block()).collect();
         let pcm = tx_blocks(tx, &blocks);
         for rx in GEARS {
-            if rx == tx {
+            if rx == tx
+                || matches!(
+                    (tx, rx),
+                    (ModemGear::Robust300, ModemGear::Speech300)
+                        | (ModemGear::Speech300, ModemGear::Robust300)
+                )
+            {
                 continue;
             }
             let mut d = FormantDemodulator::new(rx, 0.0);
@@ -98,17 +113,16 @@ fn c4_wrong_gear_never_yields_the_payload() {
 }
 
 #[test]
-fn c4_negotiating_detector_rejects_robust_but_accepts_existing_gears() {
+fn c4_negotiating_detector_accepts_all_four_live_gears() {
     let mk = |g: ModemGear| {
         let mut pcm = vec![0i16; 300];
         pcm.extend(synthesize_preamble(PreambleCapabilities::v2(g)));
         pcm.extend(vec![0i16; 320]);
         pcm
     };
-    assert!(detect_preamble(&mk(ModemGear::Robust300)).is_none());
-    assert!(detect_preamble_raw(&mk(ModemGear::Robust300)).is_some());
-    for g in [ModemGear::Narrowband1200, ModemGear::Wideband2400] {
-        let d = detect_preamble(&mk(g)).expect("existing gear still negotiable");
+    for g in GEARS {
+        assert!(detect_preamble_raw(&mk(g)).is_some());
+        let d = detect_preamble(&mk(g)).expect("all four gears are negotiable");
         assert_eq!(d.peer_caps.preferred_gear, g);
     }
 }
@@ -286,4 +300,108 @@ fn c5_probe_tone_level_alone_vs_in_dense_frame() {
         worst = worst.min(d - a);
     }
     println!("C5PROBE worst delta {:.1} dB", worst);
+}
+
+#[test]
+fn farrow_and_dll_recover_payload_under_250ppm_clock_skew() {
+    let gear = ModemGear::Narrowband1200;
+    let mut rng = Lcg(0x5150);
+    let blocks: Vec<_> = (0..12).map(|_| rng.block()).collect();
+    let tx_pcm = tx_blocks(gear, &blocks);
+    for skew_ppm in [250.0f32, -250.0f32] {
+        let skewed = apply_clock_skew(&tx_pcm, skew_ppm);
+        let mut d = FormantDemodulator::new(gear, 0.0);
+        d.set_clock_skew_ppm(skew_ppm);
+        let mut cursor = 0.0f64;
+        let mut llr_blocks = Vec::new();
+        while let Some(b) = d.demodulate_stream(&skewed, &mut cursor) {
+            llr_blocks.push(b);
+        }
+        assert!(llr_blocks.len() >= blocks.len() - 1);
+        let recovered = llr_blocks
+            .iter()
+            .take(blocks.len() - 1)
+            .enumerate()
+            .filter(|(i, llrs)| decode_superframe_fec_soft(&deinterleave_384_soft(llrs, gear.frames_per_superframe())) == blocks[*i])
+            .count();
+        assert_eq!(recovered, blocks.len() - 1, "skew {} ppm failed recovery", skew_ppm);
+    }
+}
+
+#[test]
+fn speech300_frame_pitch_recovery_survives_neteq_frame_drop_and_duplication() {
+    let gear = ModemGear::Speech300;
+    let mut rng = Lcg(0x7788);
+    let blocks: Vec<_> = (0..4).map(|_| rng.block()).collect();
+    let tx_pcm = tx_blocks(gear, &blocks);
+    let sf_samples = gear.frames_per_superframe() * FRAME_SAMPLES;
+
+    // Simulate VoLTE NetEq dropping one 20 ms frame inside superframe 0, shifting superframe 1+ earlier by 320 samples!
+    let mut dropped = Vec::with_capacity(tx_pcm.len());
+    dropped.extend_from_slice(&tx_pcm[..FRAME_SAMPLES * 5]);
+    dropped.extend_from_slice(&tx_pcm[FRAME_SAMPLES * 6..]);
+
+    // Superframe 1 now starts at `sf_samples - FRAME_SAMPLES` in `dropped`, even though its transmitter
+    // global_frame_idx started at 64 while a stateful demodulator would think it was at 63!
+    let mut d = FormantDemodulator::new(gear, 0.0);
+    let _ = d.demodulate_superframe(&dropped[..sf_samples - FRAME_SAMPLES]);
+    let llrs_sf1 = d.demodulate_superframe(&dropped[sf_samples - FRAME_SAMPLES..2 * sf_samples - FRAME_SAMPLES]);
+    let got_sf1 = decode_superframe_fec_soft(&deinterleave_384_soft(&llrs_sf1, gear.frames_per_superframe()));
+    assert_eq!(got_sf1, blocks[1], "frame-stateless Speech300 pitch recovery must survive NetEq 20ms drop");
+
+    // Also verify `apply_jitter_time_scale` produces finite bounded audio.
+    let jittered = apply_jitter_time_scale(&tx_pcm, 0.01, 42);
+    assert!(!jittered.is_empty());
+}
+
+#[test]
+fn acelp_vocoder_simulator_produces_bounded_speech_like_output() {
+    let gear = ModemGear::Robust300;
+    let mut rng = Lcg(0xACE1);
+    let blocks: Vec<_> = (0..4).map(|_| rng.block()).collect();
+    let tx_pcm = tx_blocks(gear, &blocks);
+    for prof in [
+        AcelpChannelProfile::evs_24k4(),
+        AcelpChannelProfile::amr_wb_12k65(),
+        AcelpChannelProfile::amr_wb_6k60(),
+    ] {
+        let out = apply_acelp_channel(&tx_pcm, &prof);
+        assert_eq!(out.len(), tx_pcm.len());
+        assert!(out.iter().any(|&s| s != 0));
+    }
+    // High-rate EVS 24.4 kbps ACELP decodes Robust300 cleanly.
+    let evs_pcm = apply_acelp_channel(&tx_pcm, &AcelpChannelProfile::evs_24k4());
+    let mut d = FormantDemodulator::new(gear, 0.0);
+    let ok = (0..blocks.len()).filter(|&i| rx_block(gear, &mut d, &evs_pcm, i) == blocks[i]).count();
+    assert!(ok >= 3, "Robust300 should survive EVS 24.4 kbps ACELP ({} of {})", ok, blocks.len());
+}
+
+#[test]
+fn multi_superframe_group_interleaver_survives_full_160ms_burst_wipeout() {
+    let mut rng = Lcg(0xFECC);
+    let group = 4usize;
+    let fps = ModemGear::Wideband2400.frames_per_superframe(); // 8 frames = 160 ms per superframe
+    let raw_blocks: Vec<[u8; SUPERFRAME_BYTES]> = (0..group).map(|_| rng.block()).collect();
+    let encoded: Vec<[u8; SUPERFRAME_BITS]> = raw_blocks.iter().map(encode_superframe_fec).collect();
+    let interleaved = interleave_superframe_group(&encoded, fps);
+    assert_eq!(interleaved.len(), group);
+
+    // Convert bits to ideal LLRs (+6.0 for 1, -6.0 for 0), then COMPLETELY ERASE superframe 1 (160 ms wipeout!).
+    let mut rx_llrs: Vec<[f32; SUPERFRAME_BITS]> = interleaved
+        .iter()
+        .map(|bits| {
+            let mut l = [0.0f32; SUPERFRAME_BITS];
+            for i in 0..SUPERFRAME_BITS {
+                l[i] = if bits[i] != 0 { 6.0 } else { -6.0 };
+            }
+            l
+        })
+        .collect();
+    rx_llrs[1] = [0.0f32; SUPERFRAME_BITS];
+
+    let deint = deinterleave_superframe_group_soft(&rx_llrs, fps);
+    for g in 0..group {
+        let got = decode_superframe_fec_soft(&deint[g]);
+        assert_eq!(got, raw_blocks[g], "group superframe {} must recover from 160ms burst erasure", g);
+    }
 }

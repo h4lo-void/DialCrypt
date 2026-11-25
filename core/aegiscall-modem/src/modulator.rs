@@ -29,7 +29,7 @@ pub enum ModemGear {
     /// 300 raw bps / ~144 net bps: 3 subbands x 1-of-4 tones on the 125 Hz harmonic grid in
     /// 500..1875 Hz, built for codec-heavy paths (VoWiFi/VoLTE with CELP coding and noise
     /// suppression) that drop simultaneous tones and attenuate everything above ~2 kHz.
-    /// One 23-byte encrypted superframe = 64 frames (1.28 s). Not negotiated yet.
+    /// One 23-byte encrypted superframe = 64 frames (1.28 s).
     Robust300 = 3,
     /// 300 raw bps / ~144 net bps: Glottal-Formant Pseudo-Speech Vocoder gear with 7-syllable
     /// prosodic pitch contour F0(t) (110..145 Hz), laryngeal voice bar (F0, 2F0, 3F0),
@@ -223,9 +223,9 @@ impl FormantModulator {
         let bpf = self.gear.bits_per_frame();
         let mut out = Vec::with_capacity(frames * FRAME_SAMPLES);
 
-        if self.gear == ModemGear::Speech300 {
-            // Keep superframe prosody cycle aligned to frame 0..64 of every superframe
-            self.frame_counter = (self.frame_counter / 64) * 64;
+        if self.gear == ModemGear::Speech300 && self.frame_counter % 64 != 0 {
+            // Advance to the next 64-frame phrase boundary without repeating an earlier phrase
+            self.frame_counter = ((self.frame_counter / 64) + 1) * 64;
         }
 
         for f in 0..frames {

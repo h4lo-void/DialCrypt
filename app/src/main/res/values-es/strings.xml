@@ -464,4 +464,9 @@
     <string name="add_replace_body">%1$s ya está guardado con otro emparejamiento. Si lo cambias, las llamadas seguras entre vosotros se cortarán hasta que %1$s también escanee tu tarjeta. Continúa solo si estás seguro de que esta tarjeta es de %1$s.</string>
     <string name="add_replace_keep">Mantener el emparejamiento actual</string>
     <string name="add_replace_confirm">Cambiar emparejamiento</string>
+    <string name="settings_modem_title">Velocidad del módem de voz</string>
+    <string name="modem_mode_wideband">Banda ancha 2400 (por defecto en voz LTE y 5G)</string>
+    <string name="modem_mode_narrowband">Banda estrecha 1200 (compatible con códecs comprimidos)</string>
+    <string name="modem_mode_robust">Robusto 300 (baja tasa para filtrado intenso)</string>
+    <string name="modem_mode_speech">Voz 300 (baja tasa con forma de voz humana)</string>
 </resources>
