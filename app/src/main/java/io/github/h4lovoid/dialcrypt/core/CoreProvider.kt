@@ -26,6 +26,8 @@ class SharedPrefsUiPreferences(
     override val showFullNumbers: StateFlow<Boolean> = fullNumbersFlow
     private val modemFlow = MutableStateFlow(ModemMode.fromName(prefs.getString(KEY_MODEM_MODE, null)))
     override val modemMode: StateFlow<ModemMode> = modemFlow
+    private val lockedBootFlow = MutableStateFlow(prefs.getBoolean(KEY_REQUIRE_LOCKED_BOOT, false))
+    override val requireLockedBootloader: StateFlow<Boolean> = lockedBootFlow
 
     init {
         // A preference saved before the mirror existed is copied once, so `:call` sees the same choice.
@@ -46,6 +48,11 @@ class SharedPrefsUiPreferences(
         modemFlow.value = mode
     }
 
+    override fun setRequireLockedBootloader(require: Boolean) {
+        prefs.edit().putBoolean(KEY_REQUIRE_LOCKED_BOOT, require).apply()
+        lockedBootFlow.value = require
+    }
+
     override fun setLanguage(language: AppLanguage) {
         prefs.edit().putString(KEY, language.name).apply()
         flow.value = language
@@ -61,10 +68,16 @@ class SharedPrefsUiPreferences(
         const val KEY = "language"
         const val KEY_FULL_NUMBERS = "show_full_numbers"
         const val KEY_MODEM_MODE = "modem_mode"
+        const val KEY_REQUIRE_LOCKED_BOOT = "require_locked_bootloader"
 
         fun readModemMode(context: Context?): ModemMode {
             val sp = context?.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE) ?: return ModemMode.WIDEBAND
             return ModemMode.fromName(sp.getString(KEY_MODEM_MODE, null))
+        }
+
+        fun readRequireLockedBootloader(context: Context?): Boolean {
+            val sp = context?.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE) ?: return false
+            return sp.getBoolean(KEY_REQUIRE_LOCKED_BOOT, false)
         }
     }
 }

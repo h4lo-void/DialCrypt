@@ -10,10 +10,6 @@ interface HardwareKeyBridge {
     val editionName: String
     val isHardwareStrongBoxBacked: Boolean
 
-    fun ensureIdentityKeyReady(attestationChallenge: ByteArray): HardwareIdentityInfo
-    fun computeP256EcdhSecret(peerPublicKeyX509: ByteArray): ByteArray
-    fun verifyPeerHardwareChain(peerCertChainDer: List<ByteArray>): PeerHardwareVerdict
-    fun duressDestroyMasterKeys(): Boolean
 
     /**
      * Creates or loads the identity signing key `aegis_id_v2` (P-256, SIGN only, SHA-256,
@@ -29,6 +25,18 @@ interface HardwareKeyBridge {
      * second use (design 6.5 self-check before a PIN is set).
      */
     fun selfTestSingleUseTickets(): Boolean
+
+    /**
+     * Creates or loads the StrongBox RSA-2048 `PURPOSE_WRAP_KEY` key `aegis_wrap_v1` and returns
+     * its X.509 SubjectPublicKeyInfo DER, or null if StrongBox key wrapping is unavailable.
+     */
+    fun ensureTicketWrappingKey(): ByteArray? = null
+
+    /**
+     * Imports a `SecureKeyWrapper` DER blob (wrapped in Rust under [ensureTicketWrappingKey])
+     * directly into StrongBox as the single-use HMAC-SHA256 ticket `aegis_pin_t<id>`.
+     */
+    fun importWrappedTicket(id: Int, wrappedKeyAsn1: ByteArray): Boolean = false
 
     /** Imports [material] (32 B) as the single-use StrongBox HMAC-SHA256 key `aegis_pin_t<id>`. The caller wipes [material]. */
     fun importTicket(id: Int, material: ByteArray): Boolean
@@ -75,15 +83,3 @@ class IdentityMaterial(
     /** Key store certificate chain, leaf first, root last. */
     val chainDer: List<ByteArray>,
 )
-
-data class HardwareIdentityInfo(
-    val publicKeyEncoded: ByteArray,
-    val attestationCertChainDer: List<ByteArray>,
-    val isStrongBoxTitanM2: Boolean,
-)
-
-enum class PeerHardwareVerdict {
-    DUAL_TITAN_M2_VERIFIED,
-    STANDARD_TEE_OR_MIXED,
-    UNTRUSTED_OR_INVALID,
-}

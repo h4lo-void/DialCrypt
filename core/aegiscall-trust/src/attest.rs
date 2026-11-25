@@ -189,6 +189,7 @@ pub struct TrustConfig {
     avb_keys: Vec<Vec<u8>>,
     app_signers: Vec<[u8; 32]>,
     min_os_patch: u32,
+    require_locked_boot: bool,
 }
 
 fn strip_leading_zeros(b: &[u8]) -> &[u8] {
@@ -247,12 +248,30 @@ impl TrustConfig {
             }
             avb.push(k.to_vec());
         }
-        Ok(Self { roots: parsed, revoked, avb_keys: avb, app_signers: app_signers.to_vec(), min_os_patch })
+        Ok(Self {
+            roots: parsed,
+            revoked,
+            avb_keys: avb,
+            app_signers: app_signers.to_vec(),
+            min_os_patch,
+            require_locked_boot: false,
+        })
+    }
+
+    /// Requires verified or allowlisted self-signed locked boot (`BootState::Unlocked` is rejected).
+    pub fn set_require_locked_boot(&mut self, require: bool) {
+        self.require_locked_boot = require;
+    }
+
+    /// True when `BootState::Unlocked` is rejected during attestation verification.
+    pub fn require_locked_boot(&self) -> bool {
+        self.require_locked_boot
     }
 
     /// Parses `ver(1)=1` followed by records `type(1) · len(2, BE) · value`:
     /// 1 root DER (>=1), 2 revoked serial, 3 AVB key, 4 app signer SHA-256 (32 B, >=1),
-    /// 5 min osPatchLevel u32 BE (exactly once). Unknown types are rejected.
+    /// 5 min osPatchLevel u32 BE (exactly once), 6 optional require_locked_boot u8 (0 or 1).
+    /// Unknown types are rejected.
     pub fn from_tlv(b: &[u8]) -> Result<Self, TrustError> {
         let bad = TrustError::ConfigMalformed;
         let (ver, mut rest) = b.split_first().ok_or(bad)?;
@@ -264,6 +283,7 @@ impl TrustConfig {
         let mut avb: Vec<&[u8]> = Vec::new();
         let mut signers: Vec<[u8; 32]> = Vec::new();
         let mut patch: Option<u32> = None;
+        let mut locked_boot: Option<bool> = None;
         while !rest.is_empty() {
             let hdr = rest.get(..3).ok_or(bad)?;
             let t = hdr.first().copied().ok_or(bad)?;
@@ -287,10 +307,20 @@ impl TrustConfig {
                     }
                     patch = Some(u32::from_be_bytes(<[u8; 4]>::try_from(v).map_err(|_| bad)?));
                 }
+                6 => {
+                    if locked_boot.is_some() || v.len() != 1 || v[0] > 1 {
+                        return Err(bad);
+                    }
+                    locked_boot = Some(v[0] == 1);
+                }
                 _ => return Err(bad),
             }
         }
-        Self::new(&roots, &revoked, &avb, &signers, patch.ok_or(bad)?)
+        let mut cfg = Self::new(&roots, &revoked, &avb, &signers, patch.ok_or(bad)?)?;
+        if let Some(req) = locked_boot {
+            cfg.set_require_locked_boot(req);
+        }
+        Ok(cfg)
     }
 }
 
@@ -505,6 +535,9 @@ fn verify_inner(
         }
         _ => BootState::Unlocked,
     };
+    if cfg.require_locked_boot && matches!(boot, BootState::Unlocked) {
+        return Err(AttestError::BootloaderUnlocked);
+    }
     // E2-9: every attestationApplicationId present (either list) must pass.
     let apps: Vec<&ApplicationId> = [&kd.software_enforced, &kd.hardware_enforced]
         .iter()

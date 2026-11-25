@@ -112,6 +112,7 @@ dependencies = [
  "p384",
  "rand_core",
  "rsa",
+ "sha1",
  "sha2",
  "subtle",
  "x509-cert",

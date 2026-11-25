@@ -188,6 +188,8 @@ class NativeSecureCore(
             NativeBridge.nativeAppClose(h)
             return false
         }
+        val strict = io.github.h4lovoid.dialcrypt.core.SharedPrefsUiPreferences.readRequireLockedBootloader(appContext)
+        NativeBridge.nativeSetStrictAttestation(h, strict)
         app = h
         ownCodeIssued = false
         return true
@@ -279,10 +281,55 @@ class NativeSecureCore(
         return true
     }
 
+    private fun commitWrappedRotation(rot: ByteArray, keepUnwritten: Boolean = true): RotationOutcome {
+        val layout = try {
+            WrappedRotationLayout.parse(rot)
+        } finally {
+            rot.fill(0)
+        }
+        if (layout == null) {
+            Log.e(TAG, "wrapped rotation layout malformed")
+            NativeBridge.nativeVaultRotateCommit(app, false)
+            return RotationOutcome.NOT_COMMITTED
+        }
+        val imported = try {
+            layout.fresh.all { keys.importWrappedTicket(it.id, it.wrappedDer) }
+        } finally {
+            layout.wipe()
+        }
+        if (!imported) {
+            NativeBridge.nativeVaultRotateCommit(app, false)
+            layout.fresh.forEach { keys.retireTicket(it.id) }
+            return RotationOutcome.NOT_COMMITTED
+        }
+        val blob = NativeBridge.nativeVaultRotateCommit(app, true)
+        if (blob == null) {
+            Log.e(TAG, "wrapped rotation commit failed")
+            layout.fresh.forEach { keys.retireTicket(it.id) }
+            return RotationOutcome.NOT_COMMITTED
+        }
+        layout.retire.forEach { pendingRetire += it }
+        if (writeAndRetire(blob)) return RotationOutcome.WRITTEN
+        if (!keepUnwritten) {
+            layout.retire.forEach { pendingRetire -= it }
+            layout.fresh.forEach { keys.retireTicket(it.id) }
+        }
+        return RotationOutcome.UNWRITTEN
+    }
+
     /** VAULT_DIRTY and contact edits: export, or rotate when the native vault requires it. */
     private fun persist(): Boolean {
         val blob = NativeBridge.nativeVaultExport(app)
         if (blob != null) return writeAndRetire(blob)
+        val wrapSpki = keys.ensureTicketWrappingKey()
+        if (wrapSpki != null) {
+            val wrappedRot = NativeBridge.nativeVaultRotateBeginWrapped(app, wrapSpki)
+            if (wrappedRot != null) {
+                val out = commitWrappedRotation(wrappedRot)
+                if (out == RotationOutcome.WRITTEN) return true
+                if (out == RotationOutcome.UNWRITTEN) return false
+            }
+        }
         val rot = NativeBridge.nativeVaultRotateBegin(app) ?: return false
         return commitRotation(rot) == RotationOutcome.WRITTEN
     }
@@ -573,9 +620,10 @@ class NativeSecureCore(
         // Only for the ringing call this screen is answering, and only from a locked vault.
         if (!ready || !coreState.value.locked || !sessions.handoffPending) return UnlockResult.UNAVAILABLE
         val w = usableWrap() ?: return UnlockResult.UNAVAILABLE
-        val p = try {
+        val directBuf = java.nio.ByteBuffer.allocateDirect(BiometricStore.STRETCH_LEN + 32)
+        val outLen = try {
             authed.updateAAD(BiometricStore.aad(w.binding))
-            authed.doFinal(w.ct)
+            authed.doFinal(java.nio.ByteBuffer.wrap(w.ct), directBuf)
         } catch (e: KeyPermanentlyInvalidatedException) {
             bioInvalidated()
             return UnlockResult.UNAVAILABLE
@@ -584,12 +632,20 @@ class NativeSecureCore(
             return UnlockResult.UNAVAILABLE
         }
         try {
-            if (p.size != BiometricStore.STRETCH_LEN) return UnlockResult.UNAVAILABLE
+            if (outLen != BiometricStore.STRETCH_LEN) return UnlockResult.UNAVAILABLE
+            directBuf.flip()
             return withUnlockStart { st, blob, live ->
-                finishWithTicket(st, blob, NativeBridge.nativePinBeginStretch(app, blob, p, live), viaPin = false)
+                finishWithTicket(
+                    st,
+                    blob,
+                    NativeBridge.nativePinBeginStretchDirect(app, blob, directBuf, live),
+                    viaPin = false,
+                )
             }
         } finally {
-            p.fill(0)
+            directBuf.clear()
+            while (directBuf.hasRemaining()) directBuf.put(0)
+            directBuf.clear()
         }
     }
 
@@ -608,11 +664,19 @@ class NativeSecureCore(
         keys.listTickets().forEach(keys::retireTicket)
         val p = PinInput.utf8(normal)
         val d = PinInput.utf8(duress)
+        val wrapSpki = keys.ensureTicketWrappingKey()
+        var usedWrapped = false
         val rot = try {
             if (p == null || d == null || p.size > PinInput.NATIVE_MAX_BYTES || d.size > PinInput.NATIVE_MAX_BYTES) {
                 return PinResult.FAILED
             }
-            NativeBridge.nativePinSetup(app, p, d)
+            val wrapped = wrapSpki?.let { NativeBridge.nativePinSetupWrapped(app, p, d, it) }
+            if (wrapped != null) {
+                usedWrapped = true
+                wrapped
+            } else {
+                NativeBridge.nativePinSetup(app, p, d)
+            }
         } finally {
             p?.fill(0)
             d?.fill(0)
@@ -621,7 +685,19 @@ class NativeSecureCore(
             Log.e(TAG, "nativePinSetup failed")
             return PinResult.FAILED
         }
-        if (commitRotation(rot) != RotationOutcome.WRITTEN) {
+        val firstCommit = if (usedWrapped) {
+            val out = commitWrappedRotation(rot)
+            if (out == RotationOutcome.NOT_COMMITTED) {
+                // StrongBox rejected WrappedKeyEntry for HMAC on this firmware; fall back to standard import.
+                val plainRot = NativeBridge.nativeVaultRotateBegin(app)
+                if (plainRot != null) commitRotation(plainRot) else RotationOutcome.NOT_COMMITTED
+            } else {
+                out
+            }
+        } else {
+            commitRotation(rot)
+        }
+        if (firstCommit != RotationOutcome.WRITTEN) {
             // The native vault exists only in memory; start over with an empty app object.
             resetApp()
             keys.listTickets().forEach(keys::retireTicket)
@@ -809,6 +885,14 @@ class NativeSecureCore(
      * also discards the staged PINs in the native vault; after a commit the new tickets are retired.
      */
     private fun rotatePinChange(): RotationOutcome {
+        val wrapSpki = keys.ensureTicketWrappingKey()
+        if (wrapSpki != null) {
+            val wrapped = NativeBridge.nativeVaultRotateBeginWrapped(app, wrapSpki)
+            if (wrapped != null) {
+                val out = commitWrappedRotation(wrapped, keepUnwritten = false)
+                if (out != RotationOutcome.NOT_COMMITTED) return out
+            }
+        }
         val rot = NativeBridge.nativeVaultRotateBegin(app)
         val outcome = if (rot == null) RotationOutcome.NOT_COMMITTED else commitRotation(rot, keepUnwritten = false)
         if (outcome == RotationOutcome.NOT_COMMITTED) NativeBridge.nativeVaultRotateCommit(app, false)

@@ -68,6 +68,8 @@ pub enum AttestError {
     BrandMissing,
     /// 6.1: attestationIdBrand is not `google`.
     BrandMismatch,
+    /// Strict attestation policy rejected an unlocked or unrecognized bootloader.
+    BootloaderUnlocked,
 }
 
 /// Errors returned by this crate.

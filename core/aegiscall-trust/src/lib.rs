@@ -12,6 +12,7 @@ mod der_lite;
 mod error;
 pub mod keydesc;
 mod vault;
+pub mod wrap;
 
 pub use aegiscall_memsec::SecretKey32;
 pub use attest::{
@@ -22,6 +23,7 @@ pub use error::{AttestError, TrustError};
 pub use vault::{
     duress_overwrite, ContactProof, ContactSnapshot, ContactView, KdfParams, NewContact, PeerExpectation,
     PhoneChoice, ResumeCandidate, Rotation, TicketUse, UnlockOutcome, Vault, ARGON2ID_PARAMS,
-    MAX_CONTACTS, MAX_LABEL_LEN, MAX_PIN_LEN, MAX_VAULT_LEN, MIN_PIN_LEN, TICKETS_PER_VAULT,
-    VAULT_PAD_BLOCK,
+    MAX_CONTACTS, MAX_LABEL_LEN, MAX_PIN_LEN, MAX_UNREFRESHED_RESUMES, MAX_VAULT_LEN, MIN_PIN_LEN,
+    TICKETS_PER_VAULT, VAULT_PAD_BLOCK,
 };
+pub use wrap::{parse_wrapping_public_key, wrap_ticket_for_strongbox};

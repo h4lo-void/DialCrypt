@@ -496,3 +496,47 @@ fn session_create_gear_accepts_every_wire_gear() {
     assert_eq!(b.session_create_gear(app, true, 0, None, 9, 1_000), Err(BAD_ARG));
     assert_eq!(b.app_close(app), OK);
 }
+
+#[test]
+fn wrapped_ticket_rotation_works_end_to_end() {
+    let b = Bridge::new();
+    let d = Device::new();
+    let app = d.open(&b);
+    assert_eq!(b.set_strict_attestation(app, true), OK);
+    assert_eq!(b.set_strict_attestation(app, false), OK);
+
+    // Deterministic 2048-bit RSA SPKI DER (OID 1.2.840.113549.1.1.1, e = 65537).
+    let mut mod_int = vec![0x00u8];
+    let mut modulus = [0x5au8; 256];
+    modulus[0] = 0xc3;
+    modulus[255] = 0x9d;
+    mod_int.extend_from_slice(&modulus);
+    let pkcs1 = seq(&[tlv(&[0x02], &mod_int), int(65_537)]);
+    let alg = seq(&[
+        vec![0x06, 0x09, 0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01, 0x01],
+        vec![0x05, 0x00],
+    ]);
+    let mut bit_str = vec![0x00];
+    bit_str.extend_from_slice(&pkcs1);
+    let wrap_spki = seq(&[alg, tlv(&[0x03], &bit_str)]);
+
+    let wrapped = b.pin_setup_wrapped(app, PIN, DURESS, &wrap_spki).expect("wrapped setup");
+    let count = usize::from(wrapped[0]);
+    assert_eq!(count, 5);
+    let mut off = 1;
+    for _ in 0..count {
+        let _id = be32(&wrapped[off..]);
+        let der_len = usize::from(u16::from_be_bytes([wrapped[off + 4], wrapped[off + 5]]));
+        assert_eq!(wrapped[off + 6], 0x30, "SecureKeyWrapper ASN.1 SEQUENCE");
+        off += 6 + der_len;
+    }
+    let retire_count = usize::from(wrapped[off]);
+    assert_eq!(retire_count, 0);
+    let _blob = b.vault_rotate_commit(app, true).expect("commit wrapped setup");
+
+    let rot2 = b.vault_rotate_begin_wrapped(app, &wrap_spki).expect("wrapped rotate");
+    assert_eq!(rot2[0], 5);
+    let _blob2 = b.vault_rotate_commit(app, true).expect("commit wrapped rotate");
+
+    assert_eq!(b.app_close(app), OK);
+}

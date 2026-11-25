@@ -594,6 +594,7 @@ impl ChatSessionEngine {
         let aad = msg_aad(dir, epoch, msg_id);
         let aead = XChaCha20Poly1305::new(msg_key.as_bytes().into());
         drop(msg_key);
+        self.cipher.retire_tx_message_key(epoch, u32::from(msg_id));
         let ct = aead
             .encrypt(XNonce::from_slice(&nonce), Payload { msg: inner.as_slice(), aad: &aad })
             .map_err(|_| ChatError::InnerAuthFailed)?;
@@ -798,10 +799,25 @@ impl ChatSessionEngine {
     /// (the caller may then try it as a handshake frame); other errors are fatal.
     pub fn process_rx_wire_superframe(&mut self, wire: &[u8; SUPERFRAME_LEN], now_ms: u64) -> Result<RxOutcome, ChatError> {
         let before = self.cipher.tx_epoch();
-        let opened = self.cipher.open_superframe(wire).map_err(|e| match e {
-            EpochError::AuthenticationFailed | EpochError::ReplayDetected => ChatError::FrameRejected,
-            other => ChatError::Epoch(other),
-        })?;
+        let opened = match self.cipher.open_superframe(wire) {
+            Ok(o) => o,
+            Err(EpochError::AuthenticationFailed) => {
+                if self.cipher.take_rekey_signal() {
+                    match self.role {
+                        Role::Initiator => self.ratchet.request(),
+                        Role::Responder => {
+                            let mut body = [0u8; MUX_BODY_LEN];
+                            body[0] = 1;
+                            body[1..5].copy_from_slice(&self.cipher.rx_epoch().to_be_bytes());
+                            self.mux.enqueue_ctrl(ctrl_frame(ctrl::DH_RATCHET_REQ, body));
+                        }
+                    }
+                }
+                return Err(ChatError::FrameRejected);
+            }
+            Err(EpochError::ReplayDetected) => return Err(ChatError::FrameRejected),
+            Err(other) => return Err(ChatError::Epoch(other)),
+        };
         let after = self.cipher.tx_epoch();
         if after != before {
             self.push_event(EngineEvent::EpochAdvanced(after));
@@ -858,7 +874,14 @@ impl ChatSessionEngine {
             ctrl::DH_RATCHET_ACK => self.on_ratchet_ack_fragment(body)?,
             ctrl::DH_RATCHET_REQ => {
                 if self.role == Role::Initiator {
-                    self.ratchet.request();
+                    if body[0] == 1 {
+                        let req_epoch = u32::from_be_bytes([body[1], body[2], body[3], body[4]]);
+                        if self.cipher.tx_epoch() <= req_epoch && !self.ratchet.is_pending() {
+                            self.ratchet.request();
+                        }
+                    } else {
+                        self.ratchet.request();
+                    }
                 }
             }
             ctrl::PING_KEEPALIVE => {}
@@ -1103,6 +1126,7 @@ impl ChatSessionEngine {
         let Ok(plain) = aead.decrypt(XNonce::from_slice(&nonce), Payload { msg: ct, aad: &aad }) else {
             return false;
         };
+        self.cipher.retire_rx_message_key(epoch, u32::from(msg_id));
         let inner = Zeroizing::new(plain);
         if inner.len() < 6 || inner[3] != 0 || inner[2] != CONTENT_TEXT {
             return false;

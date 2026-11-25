@@ -9,6 +9,7 @@ import android.security.keystore.KeyPermanentlyInvalidatedException
 import android.security.keystore.KeyProperties
 import android.security.keystore.KeyProtection
 import android.security.keystore.StrongBoxUnavailableException
+import android.security.keystore.WrappedKeyEntry
 import android.util.Log
 import io.github.h4lovoid.dialcrypt.BuildConfig
 import java.security.KeyFactory
@@ -18,9 +19,8 @@ import java.security.PrivateKey
 import java.security.SecureRandom
 import java.security.Signature
 import java.security.spec.ECGenParameterSpec
-import java.security.spec.X509EncodedKeySpec
+import java.security.spec.RSAKeyGenParameterSpec
 import javax.crypto.Cipher
-import javax.crypto.KeyAgreement
 import javax.crypto.KeyGenerator
 import javax.crypto.Mac
 import javax.crypto.SecretKey
@@ -30,102 +30,16 @@ import javax.crypto.spec.SecretKeySpec
 
 /**
  * Google Pixel Titan M2 Hardware Security Edition:
- * Enforces `setIsStrongBoxBacked(true)` so identity keys never leave the Titan M2 EAL6+ silicon,
- * executes in-chip ECDH P-256 agreement, verifies remote X.509 StrongBox certificate chains,
- * and supports sub-10ms Duress PIN irreversible key deletion.
+ * Enforces `setIsStrongBoxBacked(true)` so identity, ticket, wrapping, and biometric keys never
+ * leave the Titan M2 EAL6+ silicon, imports single-use PIN tickets via `WrappedKeyEntry` so raw
+ * key bytes stay out of the ART heap, and destroys all keystore aliases on duress or wipe.
  */
 class TitanM2StrongBoxBridge(private val context: Context) : HardwareKeyBridge {
-    private val keyAlias = "aegischat_titan_m2_strongbox_id"
     override val editionName: String = "DialCrypt Pixel Titan M2 (StrongBox EAL6+)"
 
     override val isHardwareStrongBoxBacked: Boolean
         get() = context.packageManager.hasSystemFeature(PackageManager.FEATURE_STRONGBOX_KEYSTORE)
 
-    override fun ensureIdentityKeyReady(attestationChallenge: ByteArray): HardwareIdentityInfo {
-        if (!isHardwareStrongBoxBacked) {
-            throw StrongBoxUnavailableException(
-                "Titan M2 StrongBox is required; this device is not supported."
-            )
-        }
-
-        val ks = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
-        if (!ks.containsAlias(keyAlias)) {
-            val kpg = KeyPairGenerator.getInstance(KeyProperties.KEY_ALGORITHM_EC, "AndroidKeyStore")
-            val builder = KeyGenParameterSpec.Builder(
-                keyAlias,
-                KeyProperties.PURPOSE_AGREE_KEY or KeyProperties.PURPOSE_SIGN,
-            )
-                .setAlgorithmParameterSpec(ECGenParameterSpec("secp256r1"))
-                .setDigests(KeyProperties.DIGEST_SHA256)
-                .setIsStrongBoxBacked(true)
-                .setAttestationChallenge(attestationChallenge)
-
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-                builder.setUnlockedDeviceRequired(true)
-            }
-
-            kpg.initialize(builder.build())
-            kpg.generateKeyPair()
-        }
-
-        // Verify hardware backing level via KeyInfo
-        val privateKey = ks.getKey(keyAlias, null) as java.security.PrivateKey
-        val factory = KeyFactory.getInstance(privateKey.algorithm, "AndroidKeyStore")
-        val keyInfo = factory.getKeySpec(privateKey, KeyInfo::class.java)
-        val strongBoxVerified = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-            keyInfo.securityLevel == KeyProperties.SECURITY_LEVEL_STRONGBOX
-        } else {
-            @Suppress("DEPRECATION")
-            keyInfo.isInsideSecureHardware
-        }
-        check(strongBoxVerified) { "Private key is not isolated inside Titan M2 StrongBox hardware!" }
-
-        val certChain = ks.getCertificateChain(keyAlias)?.map { it.encoded } ?: emptyList()
-        val pubKey = ks.getCertificate(keyAlias).publicKey.encoded
-        return HardwareIdentityInfo(
-            publicKeyEncoded = pubKey,
-            attestationCertChainDer = certChain,
-            isStrongBoxTitanM2 = true,
-        )
-    }
-
-    override fun computeP256EcdhSecret(peerPublicKeyX509: ByteArray): ByteArray {
-        val ks = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
-        val privateKey = ks.getKey(keyAlias, null) as java.security.PrivateKey
-        val peerKey = KeyFactory.getInstance("EC").generatePublic(X509EncodedKeySpec(peerPublicKeyX509))
-        // Executes ECDH strictly inside the Titan M2 chip; private key material never enters main CPU RAM
-        val ka = KeyAgreement.getInstance("ECDH", "AndroidKeyStore")
-        ka.init(privateKey)
-        ka.doPhase(peerKey, true)
-        return ka.generateSecret()
-    }
-
-    /**
-     * Always returns [PeerHardwareVerdict.UNTRUSTED_OR_INVALID] (fail-closed).
-     *
-     * A real verifier is not implemented yet. It must anchor the chain to the built-in Google hardware
-     * attestation root certificates, parse the KeyDescription extension (security level, attestation
-     * version), and bind the attestation challenge and the peer identity public key to the session.
-     * Until then no peer can be reported as hardware-verified.
-     */
-    override fun verifyPeerHardwareChain(peerCertChainDer: List<ByteArray>): PeerHardwareVerdict {
-        return PeerHardwareVerdict.UNTRUSTED_OR_INVALID
-    }
-
-    /**
-     * Triggered by Duress PIN or Panic Wipe: immediately instructs Titan M2 StrongBox
-     * to purge the hardware-isolated identity key entry (< 10ms irreversible wipe).
-     */
-    override fun duressDestroyMasterKeys(): Boolean {
-        val ks = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
-        if (ks.containsAlias(keyAlias)) {
-            ks.deleteEntry(keyAlias)
-        }
-        if (ks.containsAlias(BIO_ALIAS)) {
-            ks.deleteEntry(BIO_ALIAS)
-        }
-        return true
-    }
 
     // ---- secure-session v2: identity signing key and single-use PIN tickets (design 6.5, 6.6) ----
 
@@ -237,6 +151,54 @@ class TitanM2StrongBoxBridge(private val context: Context) : HardwareKeyBridge {
         }
     }
 
+    override fun ensureTicketWrappingKey(): ByteArray? {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S || !isHardwareStrongBoxBacked) return null
+        return try {
+            val ks = keyStore()
+            if (!ks.containsAlias(WRAP_ALIAS)) {
+                val spec = KeyGenParameterSpec.Builder(WRAP_ALIAS, KeyProperties.PURPOSE_WRAP_KEY)
+                    .setAlgorithmParameterSpec(RSAKeyGenParameterSpec(2048, RSAKeyGenParameterSpec.F4))
+                    .setDigests(KeyProperties.DIGEST_SHA256)
+                    .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_RSA_OAEP)
+                    .setIsStrongBoxBacked(true)
+                    .build()
+                KeyPairGenerator.getInstance(KeyProperties.KEY_ALGORITHM_RSA, KEY_STORE).run {
+                    initialize(spec)
+                    generateKeyPair()
+                }
+            }
+            val privateKey = ks.getKey(WRAP_ALIAS, null) as? PrivateKey ?: return null
+            val info = KeyFactory.getInstance(privateKey.algorithm, KEY_STORE).getKeySpec(privateKey, KeyInfo::class.java)
+            if (info.securityLevel != KeyProperties.SECURITY_LEVEL_STRONGBOX) {
+                deleteQuietly(WRAP_ALIAS)
+                return null
+            }
+            ks.getCertificate(WRAP_ALIAS)?.publicKey?.encoded
+        } catch (e: Exception) {
+            Log.w(TAG, "StrongBox ticket wrapping key unavailable: " + e.javaClass.simpleName)
+            deleteQuietly(WRAP_ALIAS)
+            null
+        }
+    }
+
+    override fun importWrappedTicket(id: Int, wrappedKeyAsn1: ByteArray): Boolean {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S || wrappedKeyAsn1.isEmpty()) return false
+        return try {
+            val spec = KeyGenParameterSpec.Builder(ticketAlias(id), KeyProperties.PURPOSE_SIGN)
+                .setDigests(KeyProperties.DIGEST_SHA256)
+                .setIsStrongBoxBacked(true)
+                .setUnlockedDeviceRequired(true)
+                .setMaxUsageCount(1)
+                .build()
+            val entry = WrappedKeyEntry(wrappedKeyAsn1, WRAP_ALIAS, "RSA/ECB/OAEPPadding", spec)
+            keyStore().setEntry(ticketAlias(id), entry, null)
+            true
+        } catch (e: Exception) {
+            Log.w(TAG, "wrapped single-use ticket import failed: " + e.javaClass.simpleName)
+            false
+        }
+    }
+
     override fun importTicket(id: Int, material: ByteArray): Boolean =
         material.size == 32 && importSingleUseHmac(ticketAlias(id), material)
 
@@ -263,16 +225,15 @@ class TitanM2StrongBoxBridge(private val context: Context) : HardwareKeyBridge {
             .toIntArray()
 
     override fun destroyAllKeys(): Boolean {
+        val fixed = listOf(ID_ALIAS, LEGACY_ID_ALIAS, PROBE_ALIAS, SCREEN_ALIAS, BIO_ALIAS, WRAP_ALIAS, NUMBER_INDEX_ALIAS)
         val aliases = try {
             keyStore().aliases().toList()
         } catch (e: Exception) {
-            listOf(ID_ALIAS, keyAlias, PROBE_ALIAS, SCREEN_ALIAS, BIO_ALIAS)
+            fixed
         }
         var ok = true
-        for (alias in (aliases + listOf(ID_ALIAS, keyAlias, PROBE_ALIAS, SCREEN_ALIAS, BIO_ALIAS)).distinct()) {
-            if (alias == ID_ALIAS || alias == keyAlias || alias == PROBE_ALIAS ||
-                alias == SCREEN_ALIAS || alias == BIO_ALIAS || alias.startsWith(TICKET_PREFIX)
-            ) {
+        for (alias in (aliases + fixed).distinct()) {
+            if (alias in fixed || alias.startsWith(TICKET_PREFIX)) {
                 ok = deleteQuietly(alias) && ok
             }
         }
@@ -337,8 +298,11 @@ class TitanM2StrongBoxBridge(private val context: Context) : HardwareKeyBridge {
         const val KEY_STORE = "AndroidKeyStore"
         const val TAG = "AegisKeys"
         const val ID_ALIAS = "aegis_id_v2"
+        const val LEGACY_ID_ALIAS = "aegischat_titan_m2_strongbox_id"
         const val SCREEN_ALIAS = "aegis_screen_v1"
         const val BIO_ALIAS = "aegis_bio_v1"
+        const val WRAP_ALIAS = "aegis_wrap_v1"
+        const val NUMBER_INDEX_ALIAS = "dialcrypt_number_index_v1"
         const val TICKET_PREFIX = "aegis_pin_t"
         const val PROBE_ALIAS = "aegis_pin_probe"
         val ID_CHALLENGE = "AegisChat-ID-v2".toByteArray(Charsets.US_ASCII)
