@@ -1,0 +1,143 @@
+name: Demo release
+
+# Builds the no-PIN field-test variant with tools/android-build/build.sh on a GitHub runner and
+# publishes the module zip, which also installs the app, as a pre-release. Demo only: the vault
+# opens with a PIN built into the app, so the result must never be installed on a phone in real use.
+#
+# Start it from the Actions tab (Run workflow) or by pushing a tag that starts with "demo-".
+# Publishing a tag that already has a release replaces that release.
+#
+# Signing key: when the repository secrets DEMO_KEYSTORE_B64 (the PKCS12 key store in base64, key
+# alias aegis-test) and DEMO_KEYSTORE_PASS (its password) are set, the build is signed with that
+# key. Otherwise the run makes a one-off key. A peer only accepts an app signed with a certificate
+# listed in app_signers.txt, so the certificate is added to that file for this build when it is
+# not listed there.
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag to create; must start with "demo-"
+        required: true
+        type: string
+  push:
+    tags:
+      - "demo-*"
+
+permissions:
+  contents: write
+
+jobs:
+  demo:
+    name: Build and publish the no-PIN demo
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check the release tag
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          INPUT_TAG: ${{ inputs.tag }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then tag=$INPUT_TAG; else tag=$REF_NAME; fi
+          if ! echo "$tag" | grep -Eq '^demo-[A-Za-z0-9._-]+$'; then
+            echo "The tag must start with demo- and hold only letters, digits, dots, underscores and hyphens."
+            exit 1
+          fi
+          echo "RELEASE_TAG=$tag" >> "$GITHUB_ENV"
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - uses: android-actions/setup-android@v3
+        with:
+          packages: platform-tools platforms;android-35 build-tools;35.0.0 ndk;27.2.12479018
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android
+
+      - name: Install cargo-ndk
+        run: cargo install cargo-ndk --version 4.1.2 --locked
+
+      - name: Prepare the signing key
+        env:
+          DEMO_KEYSTORE_B64: ${{ secrets.DEMO_KEYSTORE_B64 }}
+          DEMO_KEYSTORE_PASS: ${{ secrets.DEMO_KEYSTORE_PASS }}
+        run: |
+          key_dir="$RUNNER_TEMP/aegis-keys"
+          keystore="$key_dir/test-release.jks"
+          pass_file="$key_dir/pass.txt"
+          umask 077
+          mkdir -p "$key_dir"
+          if [ -n "$DEMO_KEYSTORE_B64" ] && [ -n "$DEMO_KEYSTORE_PASS" ]; then
+            echo "$DEMO_KEYSTORE_B64" | base64 -d > "$keystore"
+            echo "$DEMO_KEYSTORE_PASS" > "$pass_file"
+            key_note="Signed with the demo key kept in the repository secrets."
+          else
+            openssl rand -hex 24 > "$pass_file"
+            keytool -genkeypair -storetype PKCS12 -keystore "$keystore" -storepass:file "$pass_file" \
+              -alias aegis-test -keyalg RSA -keysize 4096 -validity 10950 -dname "CN=DialCrypt Demo" >/dev/null 2>&1
+            key_note="Signed with a one-off key made by this workflow run, so a secure session only works between phones that run this same release."
+          fi
+          cert_sha=$(keytool -exportcert -keystore "$keystore" -storepass:file "$pass_file" -alias aegis-test | openssl dgst -sha256 -r | cut -c1-64)
+          if ! echo "$cert_sha" | grep -Eq '^[0-9a-f]{64}$'; then
+            echo "Could not read the certificate of the signing key."
+            exit 1
+          fi
+          signers=app/src/main/res/raw/app_signers.txt
+          if ! grep -Fxq "$cert_sha" "$signers"; then
+            { echo; echo "# Signing key of this demo build."; echo "$cert_sha"; } >> "$signers"
+          fi
+          {
+            echo "AEGIS_KEY_DIR=$key_dir"
+            echo "CERT_SHA=$cert_sha"
+            echo "KEY_NOTE=$key_note"
+          } >> "$GITHUB_ENV"
+
+      - name: Build the module and the APK
+        env:
+          AEGIS_TEST_NO_PIN: "1"
+        run: |
+          export ANDROID_NDK_HOME="$ANDROID_HOME/ndk/27.2.12479018"
+          bash tools/android-build/build.sh
+          if [ "$(cat out/app_cert_sha256.txt)" != "$CERT_SHA" ]; then
+            echo "The APK is not signed with the prepared key."
+            exit 1
+          fi
+
+      - name: Publish the pre-release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          mkdir dist
+          cp out/aegischat-module-FIELDTEST.zip dist/
+          zip_sha=$(sha256sum dist/aegischat-module-FIELDTEST.zip | cut -c1-64)
+          {
+            echo "Prebuilt DialCrypt for demonstrating the secure call and chat path without the PIN screens."
+            echo
+            echo "**Demo only. Never install this on a phone in real use.** The vault is set up and unlocked with a PIN built into the app, so anyone holding the phone can open it."
+            echo
+            echo "**Requirements:** the same as the normal build: a rooted Pixel with Titan M2 and Magisk, on both phones. It does not work on an ordinary phone, because the secure call path needs privileged call-audio permissions that only the module grants."
+            echo
+            echo "**Install:** aegischat-module-FIELDTEST.zip is the only file. Flash it in Magisk on both phones and reboot; it installs the app as a privileged system app together with the root helper and sets app_cert_sha256 in /data/adb/aegischat/policy.conf by itself, so nothing has to be typed in. The app cannot be installed as a plain APK: the privileged call-audio permissions are only granted to the app the module installs."
+            echo
+            echo "$KEY_NOTE"
+            echo
+            echo "Built by GitHub Actions from commit $GITHUB_SHA with AEGIS_TEST_NO_PIN=1 and tools/android-build/build.sh (variant pixelTitanFieldTest). This is an automated build that has not been verified on a device."
+            echo
+            echo "SHA-256 of the zip: $zip_sha"
+            echo
+            echo "SHA-256 of the app signing certificate: $CERT_SHA"
+          } > "$RUNNER_TEMP/notes.md"
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release delete "$RELEASE_TAG" --yes
+          fi
+          gh release create "$RELEASE_TAG" dist/aegischat-module-FIELDTEST.zip --title "DialCrypt no-PIN demo ($RELEASE_TAG)" --notes-file "$RUNNER_TEMP/notes.md" --prerelease --target "$GITHUB_SHA"
