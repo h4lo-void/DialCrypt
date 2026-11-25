@@ -18,6 +18,7 @@
 //! | 9    | VIOLATION | d→App     | code(u16 BE) |
 //! | 10   | END       | App→d     | – |
 //! | 11   | ENDED     | d→App     | status(1): 0 restored, 1 restore incomplete |
+//! | 12   | TRIM      | App→d     | – (best-effort `sm fstrim` after duress/wipe) |
 //!
 //! mode: 0 dry run (nothing on the device was changed), 1 armed.
 //! In both modes the daemon raises RLIMIT_MEMLOCK of the attaching secure
@@ -53,6 +54,7 @@ const T_HEARTBEAT: u8 = 8;
 const T_VIOLATION: u8 = 9;
 const T_END: u8 = 10;
 const T_ENDED: u8 = 11;
+const T_TRIM: u8 = 12;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FrameError {
@@ -68,6 +70,7 @@ pub enum ClientMsg {
     Attach { lease: [u8; 16] },
     Heartbeat { lease: [u8; 16] },
     End,
+    TrimStorage,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -109,6 +112,7 @@ pub fn encode_client(m: &ClientMsg) -> Vec<u8> {
         ClientMsg::Attach { lease } => frame(T_ATTACH, lease),
         ClientMsg::Heartbeat { lease } => frame(T_HEARTBEAT, lease),
         ClientMsg::End => frame(T_END, &[]),
+        ClientMsg::TrimStorage => frame(T_TRIM, &[]),
     }
 }
 
@@ -122,6 +126,7 @@ pub fn decode_client(body: &[u8]) -> Result<ClientMsg, FrameError> {
         T_ATTACH => Ok(ClientMsg::Attach { lease: lease_of(p)? }),
         T_HEARTBEAT => Ok(ClientMsg::Heartbeat { lease: lease_of(p)? }),
         T_END => need(0).map(|_| ClientMsg::End),
+        T_TRIM => need(0).map(|_| ClientMsg::TrimStorage),
         _ => Err(FrameError::UnknownType),
     }
 }
@@ -209,6 +214,7 @@ mod tests {
             ClientMsg::Attach { lease },
             ClientMsg::Heartbeat { lease },
             ClientMsg::End,
+            ClientMsg::TrimStorage,
         ] {
             let f = encode_client(&m);
             let mut r = FrameReader::default();

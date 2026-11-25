@@ -3,14 +3,11 @@
 //! - no arguments: restore any leftover journal, then serve the App
 //! - `--recover-boot`: restore a journal left by a crash or reboot and exit
 //! - `--fill-memory <reserve_mib> <max_ms>`: tier 2 memory scrub helper
-//! - `--selftest`: offline self-test of the uplink mute path
+//! - `--selftest`: offline self-test of firewall, IPC, and journal invariants
 //!
 //! Exit codes follow sysexits: 0 ok, 64 usage, 70 self-test failed,
 //! 71 socket unavailable, 75 restore incomplete, 77 not root,
 //! 78 unsupported platform or device.
-
-use aegiscalld::mute_guard::MuteFirewall;
-use aegiscalld::pixel_audio::{PixelAudioRouteState, PixelTelephonyBridge};
 
 const EX_OK: i32 = 0;
 const EX_USAGE: i32 = 64;
@@ -164,21 +161,72 @@ fn fill_memory(_reserve: &str, _max_ms: &str) -> i32 {
     EX_CONFIG
 }
 
-/// Offline check of the audio mute path (audio routing is unchanged here).
+/// Offline check of the daemon's firewall, IPC framing, and restore journal invariants.
 fn selftest() -> i32 {
-    let mut bridge = PixelTelephonyBridge::new();
-    let fw = MuteFirewall::new(1_000);
-    bridge.engage_silent_chat_patch();
-    let mut ok = bridge.state() == PixelAudioRouteState::InterceptedSilentTyping;
-    let mut mic = [12_345i16; 320];
-    let mut ear = [9_999i16; 320];
-    let mut tx = [0i16; 320];
-    let modem = [777i16; 320];
-    bridge.filter_in_call_buffers(&mut mic, &mut ear, &mut tx, &modem);
-    ok &= mic.iter().all(|&s| s == 0) && ear.iter().all(|&s| s == 0) && tx == modem;
-    ok &= !fw.poll_watchdog(1_200) && fw.is_fail_closed_tripped();
-    fw.enforce_uplink_isolation(&mut mic, &mut tx, &modem);
-    ok &= tx.iter().all(|&s| s == 0);
+    use std::net::IpAddr;
+
+    use aegiscalld::firewall::{restore_text, Family, FwConfig, CHAIN_FWD, CHAIN_IN, CHAIN_OUT};
+    use aegiscalld::ipc::{
+        decode_client, decode_server, encode_client, encode_server, ClientMsg, FrameReader, ServerMsg, PROTO_VERSION,
+    };
+    use aegiscalld::journal::{encode_line, parse, restore_plan, Header, Kind, State, Step};
+
+    let cfg = FwConfig {
+        iface: "rmnet0".into(),
+        uids: vec![10228],
+        pcscf: vec![IpAddr::from([192, 0, 2, 10])],
+        media: Vec::new(),
+        nflog: true,
+        wlan_iface: Some("wlan0".into()),
+        epdg: vec![IpAddr::from([198, 51, 100, 20])],
+    };
+    let mut ok = true;
+    for fam in Family::ALL {
+        let rules = restore_text(&cfg, fam, true);
+        for c in [CHAIN_IN, CHAIN_OUT, CHAIN_FWD] {
+            let last = rules.lines().rfind(|l| l.starts_with(&format!("-A {c} "))).unwrap_or("");
+            ok &= last == format!("-A {c} -j DROP");
+        }
+        ok &= rules.ends_with("COMMIT\n");
+    }
+
+    let mut reader = FrameReader::default();
+    for msg in [
+        ClientMsg::Hello { version: PROTO_VERSION },
+        ClientMsg::Prepare,
+        ClientMsg::TrimStorage,
+        ClientMsg::End,
+    ] {
+        let wire = encode_client(&msg);
+        match reader.push(&wire) {
+            Ok(frames) if frames.len() == 1 => ok &= decode_client(&frames[0]) == Ok(msg),
+            _ => ok = false,
+        }
+    }
+    let srv = ServerMsg::Hello { version: PROTO_VERSION, mode: 1 };
+    let srv_wire = encode_server(&srv);
+    ok &= srv_wire.len() >= 3 && decode_server(&srv_wire[2..]) == Ok(srv);
+
+    let hdr = Header {
+        boot_id: "selftest-boot".into(),
+        lease_hash: "0123456789abcdef".into(),
+        owner_pid: 1,
+        owner_start: 1,
+    };
+    if let (Ok(h), Ok(line)) = (hdr.encode(), encode_line(1, State::Intent, Kind::Radio, "wifi", "on")) {
+        let text = format!("{h}{line}");
+        let parsed = parse(text.as_bytes());
+        let plan = restore_plan(&parsed, "selftest-boot");
+        let n = plan.len();
+        ok &= parsed.header == Some(hdr) && parsed.intents.len() == 1 && n == 3;
+        if n == 3 {
+            ok &= matches!(plan[n - 2].0, Step::FwDown(Family::V4))
+                && matches!(plan[n - 1].0, Step::FwDown(Family::V6));
+        }
+    } else {
+        ok = false;
+    }
+
     if ok {
         EX_OK
     } else {

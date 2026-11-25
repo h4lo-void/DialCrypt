@@ -13,7 +13,7 @@ use crate::journal::{self, encode_line, Header, Kind, State};
 use crate::monitor::MonState;
 use crate::policy::{Policy, POLICY_PATH};
 use crate::precheck::{self, REQUIRED_TOOLS, TIER2_TOOLS};
-use crate::session::{Input, Output, Phase, Session, BOOT_ID_PATH};
+use crate::session::{Input, Output, Phase, Session, BOOT_ID_PATH, END_CALL_CMD};
 use crate::sysops::Mutation;
 use crate::telephony::tests::{real_registry, real_siminfo};
 use crate::valid::hex_encode;
@@ -669,7 +669,7 @@ fn violation_notifies_app_reapplies_and_restores() {
     s.sys_mut().setting("global", "wifi_on", "1"); // someone switched Wi-Fi back on
     let out = tick(&mut s, 1_000);
     assert!(frames_to(&out, 2).contains(&ServerMsg::Violation { code: Code::VioRadio.as_u16() }), "{:?}", frames_to(&out, 2));
-    assert!(s.mute.is_fail_closed_tripped());
+    assert!(s.is_fail_closed_tripped());
     assert_eq!(s.sys().keys().last().map(String::as_str), Some("cmd wifi set-wifi-enabled disabled"));
     assert!(matches!(s.phase(), Phase::Ending { .. }));
     s.sys_mut().remove_proc(SECURE); // App wipes and exits
@@ -1090,7 +1090,8 @@ fn call_on_non_lte_nr_voice_bearer_is_a_violation() {
     msg(&mut s, 2, ClientMsg::Heartbeat { lease });
     let out = tick(&mut s, 2_000);
     assert!(frames_to(&out, 2).contains(&ServerMsg::Violation { code: Code::VioBearer.as_u16() }), "{:?}", frames_to(&out, 2));
-    assert!(s.mute.is_fail_closed_tripped());
+    assert!(s.is_fail_closed_tripped());
+    assert!(has_key(s.sys(), &END_CALL_CMD.join(" ")), "active call must be severed on fail-closed violation");
 }
 
 fn run_test_restore(sh: &str, journal: &std::path::Path) -> (Option<i32>, String) {
@@ -1226,7 +1227,11 @@ fn temp_file(tag: &str, data: &[u8]) -> std::path::PathBuf {
 #[test]
 fn shell_restore_script_matches_rust_plan() {
     let shells = shells();
+    #[cfg(unix)]
     assert!(!shells.is_empty(), "no POSIX shell found");
+    if shells.is_empty() {
+        return;
+    }
     let j = parity_journal();
     let path = temp_file("full", &j);
     let parsed = journal::parse(&j);
@@ -1251,7 +1256,12 @@ fn shell_restore_script_matches_rust_plan() {
 
 #[test]
 fn shell_and_rust_agree_on_every_truncation() {
-    let sh = shells().first().copied().unwrap_or("/bin/sh");
+    let sh_list = shells();
+    #[cfg(unix)]
+    assert!(!sh_list.is_empty(), "no POSIX shell found");
+    let Some(&sh) = sh_list.first() else {
+        return;
+    };
     let j = journal::tests::sample_journal();
     let path = temp_file("cut", b"");
     for cut in 0..=j.len() {
@@ -1265,7 +1275,14 @@ fn shell_and_rust_agree_on_every_truncation() {
 #[test]
 fn magisk_scripts_are_posix_and_lf() {
     let dir = format!("{}/../magisk-module", env!("CARGO_MANIFEST_DIR"));
-    let scripts = ["aegis-restore.sh", "service.sh", "post-fs-data.sh", "action.sh", "customize.sh"];
+    let scripts = [
+        "aegis-restore.sh",
+        "service.sh",
+        "post-fs-data.sh",
+        "action.sh",
+        "customize.sh",
+        "META-INF/com/google/android/update-binary",
+    ];
     for name in scripts {
         let path = format!("{dir}/{name}");
         let text = std::fs::read_to_string(&path).unwrap_or_default();
@@ -1502,4 +1519,40 @@ fn system_dialer_naming_dialcrypt_or_a_non_system_package_falls_back_to_the_cons
     f.set(PACKAGE_LIST_CMD, &without_phone.join("\n"));
     f.set(SYSTEM_DIALER_CMD, &format!("{APP_PKG}\n"));
     assert_eq!(refused(run_tier2_precheck(&mut f, &text)), Err(vec![Failure::new(Item::Tier2, Code::SystemDialerMissing)]));
+}
+
+#[test]
+fn trim_storage_and_controlled_vowifi_lockdown() {
+    // 1. TrimStorage runs `sm fstrim` when armed and is a no-op in dry-run mode.
+    let mut dry = Session::new(pixel(&policy(false, false)));
+    dry.handle(Input::Connected { conn: 1, uid: APP_UID, pid: LAUNCHER });
+    msg(&mut dry, 1, ClientMsg::TrimStorage);
+    assert!(!has_key(dry.sys(), "sm fstrim"));
+
+    let mut armed = Session::new(pixel(&policy(true, false)));
+    armed.handle(Input::Connected { conn: 1, uid: APP_UID, pid: LAUNCHER });
+    msg(&mut armed, 1, ClientMsg::TrimStorage);
+    assert!(has_key(armed.sys(), "sm fstrim"));
+
+    // 2. Controlled VoWiFi keeps Wi-Fi up while pinning wlan0 rules strictly to ePDG IPSec.
+    let vowifi_pol = format!("{}allow_vowifi=1\nepdg_addrs=198.51.100.10\n", policy(true, false));
+    let mut f = pixel(&vowifi_pol);
+    let iwlan_reg = real_registry()
+        .replace("transport: WWAN, id: 3", "transport: IWLAN, id: 3")
+        .replace("netId: 101, network type: LTE", "netId: 101, network type: IWLAN")
+        .replace("InterfaceName: rmnet2", "InterfaceName: ipsec0");
+    f.set("dumpsys telephony.registry", &iwlan_reg);
+    f.dirs.get_mut("/sys/class/net").unwrap().push("ipsec0".into());
+    f.file("/sys/class/net/ipsec0/operstate", "up");
+    f.file("/sys/class/net/wlan0/operstate", "up");
+    f.file("/sys/class/net/rmnet2/operstate", "down");
+    let mut s = Session::new(f);
+    let (msgs, lease) = prepare(&mut s);
+    assert!(msgs.iter().any(|m| matches!(m, ServerMsg::Ready { .. })), "{msgs:?}");
+    assert_eq!(s.sys().get("settings get global wifi_on"), "1", "Wi-Fi stays enabled for VoWiFi");
+    let a = attach(&mut s, lease);
+    assert!(matches!(a.as_slice(), [ServerMsg::Attached { .. }]), "{a:?}");
+    msg(&mut s, 2, ClientMsg::Heartbeat { lease });
+    let out = tick(&mut s, 2_000);
+    assert!(frames_to(&out, 2).is_empty(), "wlan0+ipsec0 must pass monitor under VoWiFi: {:?}", frames_to(&out, 2));
 }

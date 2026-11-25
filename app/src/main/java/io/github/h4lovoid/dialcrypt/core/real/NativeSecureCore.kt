@@ -400,6 +400,7 @@ class NativeSecureCore(
         val covered = cover != null && vault.overwrite(cover)
         cover?.fill(0)
         if (!covered) vault.overwriteRandom()
+        io.github.h4lovoid.dialcrypt.core.daemon.DaemonTrim.requestBestEffort()
         clearContacts()
         coreState.update { it.copy(locked = true) }
     }
@@ -414,6 +415,7 @@ class NativeSecureCore(
         keys.destroyAllKeys()
         pendingRetire.clear()
         vault.overwriteRandom()
+        io.github.h4lovoid.dialcrypt.core.daemon.DaemonTrim.requestBestEffort()
         clearContacts()
         coreState.update { it.copy(locked = true, attemptsLeft = 0, vaultDestroyed = true) }
     }
@@ -1180,6 +1182,7 @@ class NativeSecureCore(
             dropBiometric()
             if (!keys.destroyAllKeys()) Log.e(TAG, "key deletion incomplete")
             if (!vault.destroy()) Log.e(TAG, "vault file destruction incomplete")
+            io.github.h4lovoid.dialcrypt.core.daemon.DaemonTrim.requestBestEffort()
             clearContacts()
             coreState.value = CoreState(CoreAvailability.NOT_CONNECTED, pinConfigured = false, locked = true)
         }

@@ -70,6 +70,7 @@ pub struct Monitor {
     pub ims: ImsLink,
     pub allowed_ifaces: BTreeSet<String>,
     pub extra_ifaces: Vec<String>,
+    pub allow_vowifi: bool,
     pub call_state: Option<u8>,
     pub tier2: Option<Tier2Watch>,
 }
@@ -106,6 +107,7 @@ impl Monitor {
             ims,
             allowed_ifaces: BTreeSet::new(),
             extra_ifaces: extra_ifaces.to_vec(),
+            allow_vowifi: false,
             call_state: None,
             tier2,
         };
@@ -113,8 +115,16 @@ impl Monitor {
         m
     }
 
+    pub fn set_allow_vowifi(&mut self, allow: bool) {
+        self.allow_vowifi = allow;
+        self.reset_ifaces();
+    }
+
     fn reset_ifaces(&mut self) {
         self.allowed_ifaces = ["lo".to_string(), "dummy0".to_string(), self.ims.iface.clone()].into_iter().collect();
+        if self.allow_vowifi && self.ims.rat == telephony::Rat::Iwlan {
+            self.allowed_ifaces.insert("wlan0".to_string());
+        }
         self.allowed_ifaces.extend(self.extra_ifaces.iter().cloned());
     }
 
@@ -183,12 +193,12 @@ impl Monitor {
         let mut f = Vec::new();
         match sys.read_cmd(&["dumpsys", "telephony.registry"]) {
             Ok(text) => {
-                let call = telephony::parse_call_bearer(&text);
+                let call = telephony::parse_call_bearer_opts(&text, self.allow_vowifi);
                 self.call_state = Some(if call.in_call { 2 } else { 0 });
                 if call.in_call && !call.ok {
                     f.push(Finding::Violation { code: Code::VioBearer, reapply: Vec::new() });
                 }
-                match telephony::parse_ims_link(&text) {
+                match telephony::parse_ims_link_opts(&text, self.allow_vowifi) {
                     Ok(link) => {
                         let mut a = link.pcscf.clone();
                         let mut b = self.ims.pcscf.clone();

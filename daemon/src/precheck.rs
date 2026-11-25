@@ -69,8 +69,10 @@ pub struct Context {
     pub tier2: Option<Tier2Plan>,
 }
 
-pub const REQUIRED_TOOLS: [&str; 12] =
-    ["iptables", "ip6tables", "iptables-restore", "ip6tables-restore", "settings", "cmd", "svc", "dumpsys", "pm", "ime", "content", "getprop"];
+pub const REQUIRED_TOOLS: [&str; 13] = [
+    "iptables", "ip6tables", "iptables-restore", "ip6tables-restore", "settings", "cmd", "svc", "dumpsys", "pm", "ime", "content",
+    "getprop", "input",
+];
 pub const TIER2_TOOLS: [&str; 5] = ["logcat", "dmesg", "swapon", "swapoff", "mkswap"];
 
 /// Exemptions allowed by the design 6.7, only when installed on the system image.
@@ -305,8 +307,21 @@ pub fn run<S: SysOps + ?Sized>(sys: &mut S, policy: &Policy, tier2: bool) -> Res
         Err(_) => fail(Item::Ims, Code::VolteOff),
     }
     let ims = match sys.read_cmd(&["dumpsys", "telephony.registry"]) {
-        Ok(t) => match telephony::parse_ims_link(&t) {
+        Ok(t) => match telephony::parse_ims_link_opts(&t, policy.allow_vowifi) {
             Ok(l) => Some(l),
+            Err(Code::ImsNotRegistered) => {
+                let fallback = match (
+                    sys.read_cmd(&["ip", "-o", "addr"]),
+                    sys.read_cmd(&["ip", "route", "show", "table", "all"]),
+                ) {
+                    (Ok(addr), Ok(route)) => telephony::parse_ims_ip_fallback(&addr, &route, policy.allow_vowifi),
+                    _ => None,
+                };
+                if fallback.is_none() {
+                    fail(Item::Ims, Code::ImsNotRegistered);
+                }
+                fallback
+            }
             Err(c) => {
                 fail(Item::Ims, c);
                 None

@@ -63,6 +63,10 @@ pub struct FwConfig {
     pub media: Vec<IpAddr>,
     /// Emit the NFLOG rule used for media address learning.
     pub nflog: bool,
+    /// Optional Wi-Fi interface (`wlan0`) kept up exclusively for VoWiFi ePDG IPSec/IKEv2.
+    pub wlan_iface: Option<String>,
+    /// Pinned carrier ePDG addresses permitted over `wlan_iface` (UDP 500/4500 + ESP only).
+    pub epdg: Vec<IpAddr>,
 }
 
 fn host(a: &IpAddr) -> String {
@@ -88,6 +92,8 @@ pub fn restore_text(cfg: &FwConfig, fam: Family, insert_jumps: bool) -> String {
     }
     let pcscf: Vec<&IpAddr> = cfg.pcscf.iter().filter(|a| fam.matches(a) && usable_addr(a)).collect();
     let media: Vec<&IpAddr> = cfg.media.iter().filter(|a| fam.matches(a) && usable_addr(a)).collect();
+    let epdg: Vec<&IpAddr> = cfg.epdg.iter().filter(|a| fam.matches(a) && usable_addr(a)).collect();
+    let wlan = cfg.wlan_iface.as_deref().filter(|w| crate::valid::is_iface_name(w) && !epdg.is_empty());
     let ifc = &cfg.iface;
     t.push_str(&format!("-A {CHAIN_OUT} -o lo -j ACCEPT\n"));
     for uid in &cfg.uids {
@@ -98,9 +104,28 @@ pub fn restore_text(cfg: &FwConfig, fam: Family, insert_jumps: bool) -> String {
             t.push_str(&format!("-A {CHAIN_OUT} -o {ifc} -m owner --uid-owner {uid} -p udp -d {} -j ACCEPT\n", host(a)));
         }
     }
+    if let Some(w) = wlan {
+        let mut ike_uids = vec![0u32, 1000];
+        for &u in &cfg.uids {
+            if !ike_uids.contains(&u) {
+                ike_uids.push(u);
+            }
+        }
+        for e in &epdg {
+            let dst = host(e);
+            for uid in &ike_uids {
+                t.push_str(&format!("-A {CHAIN_OUT} -o {w} -m owner --uid-owner {uid} -p udp --dport 500 -d {dst} -j ACCEPT\n"));
+                t.push_str(&format!("-A {CHAIN_OUT} -o {w} -m owner --uid-owner {uid} -p udp --dport 4500 -d {dst} -j ACCEPT\n"));
+            }
+            t.push_str(&format!("-A {CHAIN_OUT} -o {w} -p esp -d {dst} -j ACCEPT\n"));
+        }
+    }
     if fam == Family::V6 {
         for ty in 133..=136 {
             t.push_str(&format!("-A {CHAIN_OUT} -o {ifc} -p ipv6-icmp -m icmp6 --icmpv6-type {ty} -j ACCEPT\n"));
+            if let Some(w) = wlan {
+                t.push_str(&format!("-A {CHAIN_OUT} -o {w} -p ipv6-icmp -m icmp6 --icmpv6-type {ty} -j ACCEPT\n"));
+            }
         }
     }
     if cfg.nflog {
@@ -118,9 +143,20 @@ pub fn restore_text(cfg: &FwConfig, fam: Family, insert_jumps: bool) -> String {
     for a in &media {
         t.push_str(&format!("-A {CHAIN_IN} -i {ifc} -p udp -s {} -j ACCEPT\n", host(a)));
     }
+    if let Some(w) = wlan {
+        for e in &epdg {
+            let src = host(e);
+            t.push_str(&format!("-A {CHAIN_IN} -i {w} -p udp --sport 500 -s {src} -j ACCEPT\n"));
+            t.push_str(&format!("-A {CHAIN_IN} -i {w} -p udp --sport 4500 -s {src} -j ACCEPT\n"));
+            t.push_str(&format!("-A {CHAIN_IN} -i {w} -p esp -s {src} -j ACCEPT\n"));
+        }
+    }
     if fam == Family::V6 {
         for ty in 133..=136 {
             t.push_str(&format!("-A {CHAIN_IN} -i {ifc} -p ipv6-icmp -m icmp6 --icmpv6-type {ty} -j ACCEPT\n"));
+            if let Some(w) = wlan {
+                t.push_str(&format!("-A {CHAIN_IN} -i {w} -p ipv6-icmp -m icmp6 --icmpv6-type {ty} -j ACCEPT\n"));
+            }
         }
     }
     t.push_str(&format!("-A {CHAIN_IN} -j DROP\n"));
@@ -219,6 +255,8 @@ mod tests {
             pcscf: vec!["10.0.0.10".parse().unwrap_or(IpAddr::from([0, 0, 0, 0])), "2607:fb90:1::10".parse().unwrap_or(IpAddr::from([0u16; 8]))],
             media: vec!["10.9.9.9".parse().unwrap_or(IpAddr::from([0, 0, 0, 0]))],
             nflog: true,
+            wlan_iface: None,
+            epdg: Vec::new(),
         }
     }
 
@@ -287,5 +325,22 @@ mod tests {
         assert_eq!(m.learned().len(), MEDIA_MAX);
         m.clear();
         assert!(m.learned().is_empty());
+    }
+
+    #[test]
+    fn vowifi_epdg_rules_restrict_wlan_strictly_to_ikev2_natt_and_esp() {
+        let mut c = cfg();
+        c.iface = "ipsec0".into();
+        c.wlan_iface = Some("wlan0".into());
+        c.epdg = vec!["198.51.100.10".parse().unwrap()];
+        let v4 = restore_text(&c, Family::V4, true);
+        assert!(v4.contains("-A aegis_out -o wlan0 -m owner --uid-owner 1000 -p udp --dport 500 -d 198.51.100.10/32 -j ACCEPT"));
+        assert!(v4.contains("-A aegis_out -o wlan0 -m owner --uid-owner 1000 -p udp --dport 4500 -d 198.51.100.10/32 -j ACCEPT"));
+        assert!(v4.contains("-A aegis_out -o wlan0 -p esp -d 198.51.100.10/32 -j ACCEPT"));
+        assert!(v4.contains("-A aegis_in -i wlan0 -p udp --sport 4500 -s 198.51.100.10/32 -j ACCEPT"));
+        for l in v4.lines().filter(|l| l.contains("wlan0") && l.ends_with("-j ACCEPT")) {
+            assert!(l.contains("198.51.100.10/32"), "unpinned wlan0 rule: {l}");
+            assert!(l.contains("500") || l.contains("4500") || l.contains("-p esp"), "non-IPSec wlan0 rule: {l}");
+        }
     }
 }
