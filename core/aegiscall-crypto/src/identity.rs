@@ -4,7 +4,7 @@
 use crate::CryptoError;
 use p256::ecdsa::signature::Verifier;
 use p256::ecdsa::{Signature, VerifyingKey};
-use p256::elliptic_curve::sec1::ToEncodedPoint;
+use p256::elliptic_curve::sec1::ToSec1Point;
 use p256::pkcs8::DecodePublicKey;
 use p256::PublicKey;
 use subtle::ConstantTimeEq;
@@ -48,7 +48,7 @@ pub fn validate_pub33(pub33: &[u8; PUB33_LEN]) -> Result<(), CryptoError> {
 /// Converts a DER SubjectPublicKeyInfo (id-ecPublicKey, prime256v1) into a compressed point.
 pub fn spki_der_to_pub33(spki: &[u8]) -> Result<[u8; PUB33_LEN], CryptoError> {
     let pk = PublicKey::from_public_key_der(spki).map_err(|_| CryptoError::InvalidPeerPublicKey)?;
-    let ep = pk.to_encoded_point(true);
+    let ep = pk.to_sec1_point(true);
     <[u8; PUB33_LEN]>::try_from(ep.as_bytes()).map_err(|_| CryptoError::InvalidPeerPublicKey)
 }
 
@@ -58,7 +58,7 @@ pub fn ecdsa_der_to_raw(der: &[u8]) -> Result<[u8; RAW_SIG_LEN], CryptoError> {
     if sig.to_der().as_bytes() != der {
         return Err(CryptoError::InvalidKeyMaterial);
     }
-    let sig = sig.normalize_s().unwrap_or(sig);
+    let sig = sig.normalize_s();
     let bytes = sig.to_bytes();
     <[u8; RAW_SIG_LEN]>::try_from(bytes.as_slice()).map_err(|_| CryptoError::InvalidKeyMaterial)
 }
@@ -72,7 +72,7 @@ pub fn verify_identity_sig(
     validate_pub33(pub33)?;
     let vk = VerifyingKey::from_sec1_bytes(pub33).map_err(|_| CryptoError::InvalidPeerPublicKey)?;
     let s = Signature::from_slice(sig).map_err(|_| CryptoError::AuthenticationFailed)?;
-    if s.normalize_s().is_some() {
+    if s.normalize_s() != s {
         return Err(CryptoError::AuthenticationFailed);
     }
     vk.verify(msg, &s).map_err(|_| CryptoError::AuthenticationFailed)
@@ -99,7 +99,7 @@ pub struct SoftwareSigner {
 impl SoftwareSigner {
     pub fn generate() -> Self {
         Self {
-            sk: p256::ecdsa::SigningKey::random(&mut rand_core::OsRng),
+            sk: <p256::ecdsa::SigningKey as p256::elliptic_curve::Generate>::generate(),
         }
     }
 
@@ -121,7 +121,7 @@ impl SoftwareSigner {
     }
 
     pub fn pub33(&self) -> [u8; PUB33_LEN] {
-        let ep = self.sk.verifying_key().to_encoded_point(true);
+        let ep = self.sk.verifying_key().to_sec1_point(true);
         let mut out = [0u8; PUB33_LEN];
         out.copy_from_slice(ep.as_bytes());
         out
@@ -133,7 +133,7 @@ impl SoftwareSigner {
             0x30, 0x59, 0x30, 0x13, 0x06, 0x07, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x02, 0x01, 0x06, 0x08,
             0x2a, 0x86, 0x48, 0xce, 0x3d, 0x03, 0x01, 0x07, 0x03, 0x42, 0x00,
         ];
-        out.extend_from_slice(self.sk.verifying_key().to_encoded_point(false).as_bytes());
+        out.extend_from_slice(self.sk.verifying_key().to_sec1_point(false).as_bytes());
         out
     }
 

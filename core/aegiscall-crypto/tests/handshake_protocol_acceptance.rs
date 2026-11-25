@@ -17,7 +17,7 @@ use std::collections::VecDeque;
 type H384 = Hmac<Sha384>;
 
 fn hmac(key: &[u8], parts: &[&[u8]]) -> Vec<u8> {
-    let mut m = <H384 as Mac>::new_from_slice(key).unwrap();
+    let mut m = <H384 as hmac::KeyInit>::new_from_slice(key).unwrap();
     for p in parts {
         m.update(p);
     }

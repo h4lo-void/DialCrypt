@@ -8,10 +8,10 @@ use sha2::Sha256;
 use std::collections::BTreeMap;
 use std::str::FromStr;
 use std::time::Duration;
-use x509_cert::builder::{Builder, CertificateBuilder, Profile};
+use x509_cert::builder::{Builder, CertificateBuilder};
 use x509_cert::certificate::Version;
-use x509_cert::der::asn1::BitString;
-use x509_cert::der::{Decode, Encode};
+use x509_cert::der::asn1::{Any, BitString};
+use x509_cert::der::{Decode, Encode, Tag};
 use x509_cert::ext::pkix::BasicConstraints;
 use x509_cert::name::Name;
 use x509_cert::serial_number::SerialNumber;
@@ -37,7 +37,7 @@ impl Ks {
     }
     fn use_t(&mut self, id: u32, input: &[u8; 32]) -> Option<[u8; 32]> {
         let k = self.0.remove(&id)?;
-        let mut m = <Hmac<Sha256> as Mac>::new_from_slice(&k).unwrap();
+        let mut m = <Hmac<Sha256> as hmac::KeyInit>::new_from_slice(&k).unwrap();
         m.update(input);
         let tag = m.finalize().into_bytes();
         let mut out = [0u8; 32];
@@ -163,18 +163,16 @@ where
     Sig: SignatureBitStringEncoding,
 {
     let mut b = CertificateBuilder::new(
-        profile,
+        FixtureProfile { kind: profile, subject: nm(subject) },
         SerialNumber::new(&[0x01, serial]).unwrap(),
         Validity::from_now(Duration::from_secs(3600)).unwrap(),
-        nm(subject),
         spki,
-        signer,
     )
     .unwrap();
     if leaf {
         b.add_extension(&BasicConstraints { ca: false, path_len_constraint: None }).unwrap();
     }
-    b.build::<Sig>().unwrap().to_der().unwrap()
+    b.build::<_, Sig>(signer).unwrap().to_der().unwrap()
 }
 
 fn key_missing() -> Option<TrustError> {
@@ -182,9 +180,9 @@ fn key_missing() -> Option<TrustError> {
 }
 
 fn rsa_inter_chain(bits: usize) -> (Vec<u8>, Vec<Vec<u8>>, [u8; 33]) {
-    let root_k = p256::ecdsa::SigningKey::random(&mut OsRng);
+    let root_k = <p256::ecdsa::SigningKey as p256::elliptic_curve::Generate>::generate();
     let root = issue::<_, p256::ecdsa::DerSignature>(&root_k, Profile::Root, 1, "CN=R Root", spki_of(root_k.verifying_key()), false);
-    let rsa_k = rsa::pkcs1v15::SigningKey::<Sha256>::new(rsa::RsaPrivateKey::new(&mut OsRng, bits).unwrap());
+    let rsa_k = rsa::pkcs1v15::SigningKey::<Sha256>::new(rsa::PrivateKey::new(&mut p256::elliptic_curve::common::getrandom::SysRng, bits).unwrap());
     let inter = issue::<_, p256::ecdsa::DerSignature>(
         &root_k,
         Profile::SubCA { issuer: nm("CN=R Root"), path_len_constraint: None },
@@ -193,7 +191,7 @@ fn rsa_inter_chain(bits: usize) -> (Vec<u8>, Vec<Vec<u8>>, [u8; 33]) {
         spki_of(&rsa_k.verifying_key()),
         false,
     );
-    let leaf_k = p256::ecdsa::SigningKey::random(&mut OsRng);
+    let leaf_k = <p256::ecdsa::SigningKey as p256::elliptic_curve::Generate>::generate();
     let leaf = issue::<_, rsa::pkcs1v15::Signature>(
         &rsa_k,
         Profile::Manual { issuer: Some(nm("CN=R Inter")) },
@@ -202,7 +200,7 @@ fn rsa_inter_chain(bits: usize) -> (Vec<u8>, Vec<Vec<u8>>, [u8; 33]) {
         spki_of(leaf_k.verifying_key()),
         true,
     );
-    let p33 = <[u8; 33]>::try_from(leaf_k.verifying_key().to_encoded_point(true).as_bytes()).unwrap();
+    let p33 = <[u8; 33]>::try_from(leaf_k.verifying_key().to_sec1_point(true).as_bytes()).unwrap();
     (root, vec![leaf, inter], p33)
 }
 
@@ -220,9 +218,9 @@ fn rsa_issuer_below_2048_bits_is_rejected() {
 
 /// root(P-256) -> inter(P-256) -> leaf(with the given SPKI); returns (root, inter, leaf, inter key).
 fn p256_chain(leaf_spki: SubjectPublicKeyInfoOwned) -> (Vec<u8>, Vec<u8>, Vec<u8>, p256::ecdsa::SigningKey) {
-    let root_k = p256::ecdsa::SigningKey::random(&mut OsRng);
+    let root_k = <p256::ecdsa::SigningKey as p256::elliptic_curve::Generate>::generate();
     let root = issue::<_, p256::ecdsa::DerSignature>(&root_k, Profile::Root, 1, "CN=P Root", spki_of(root_k.verifying_key()), false);
-    let inter_k = p256::ecdsa::SigningKey::random(&mut OsRng);
+    let inter_k = <p256::ecdsa::SigningKey as p256::elliptic_curve::Generate>::generate();
     let inter = issue::<_, p256::ecdsa::DerSignature>(
         &root_k,
         Profile::SubCA { issuer: nm("CN=P Root"), path_len_constraint: None },
@@ -237,16 +235,21 @@ fn p256_chain(leaf_spki: SubjectPublicKeyInfoOwned) -> (Vec<u8>, Vec<u8>, Vec<u8
 
 #[test]
 fn certificate_version_must_be_v3() {
-    let leaf_k = p256::ecdsa::SigningKey::random(&mut OsRng);
-    let p33 = <[u8; 33]>::try_from(leaf_k.verifying_key().to_encoded_point(true).as_bytes()).unwrap();
+    let leaf_k = <p256::ecdsa::SigningKey as p256::elliptic_curve::Generate>::generate();
+    let p33 = <[u8; 33]>::try_from(leaf_k.verifying_key().to_sec1_point(true).as_bytes()).unwrap();
     let (root, inter, leaf, inter_k) = p256_chain(spki_of(leaf_k.verifying_key()));
     let resign = |version: Version| -> Vec<u8> {
-        let mut c = Certificate::from_der(&leaf).unwrap();
-        c.tbs_certificate.version = version;
-        let tbs = c.tbs_certificate.to_der().unwrap();
+        // x509-cert 0.3 has no field setters: patch the version INTEGER inside the DER TBS
+        // ([0] EXPLICIT INTEGER, same length for v2 and v3) and reassemble the certificate.
+        let c = Certificate::from_der(&leaf).unwrap();
+        let mut tbs = c.tbs_certificate().to_der().unwrap();
+        let at = tbs.windows(5).position(|w| w == [0xa0, 0x03, 0x02, 0x01, Version::V3 as u8]).unwrap();
+        tbs[at + 4] = version as u8;
         let sig: p256::ecdsa::DerSignature = inter_k.sign(&tbs);
-        c.signature = BitString::from_bytes(sig.as_bytes()).unwrap();
-        c.to_der().unwrap()
+        let mut body = tbs;
+        body.extend_from_slice(&c.signature_algorithm().to_der().unwrap());
+        body.extend_from_slice(&BitString::from_bytes(sig.as_bytes()).unwrap().to_der().unwrap());
+        Any::new(Tag::Sequence, body).unwrap().to_der().unwrap()
     };
     let ok = vec![resign(Version::V3), inter.clone()];
     assert_eq!(verify_attestation(&ok, &cfg(&root), &p33).err(), key_missing());
@@ -259,7 +262,7 @@ fn certificate_version_must_be_v3() {
 
 #[test]
 fn leaf_key_must_be_p256() {
-    let k384 = p384::ecdsa::SigningKey::random(&mut OsRng);
+    let k384 = <p384::ecdsa::SigningKey as p256::elliptic_curve::Generate>::generate();
     let (root, inter, leaf, _) = p256_chain(spki_of(k384.verifying_key()));
     assert_eq!(
         verify_attestation(&[leaf, inter], &cfg(&root), &[2u8; 33]).err(),
@@ -273,7 +276,7 @@ fn trust_config_has_no_builtin_defaults() {
     assert_eq!(TrustConfig::from_tlv(&[]).err(), bad);
     assert_eq!(TrustConfig::from_tlv(&[1]).err(), bad);
     assert_eq!(TrustConfig::new(&[], &[], &[], &[SIGNER], 202401).err(), bad);
-    let k = p256::ecdsa::SigningKey::random(&mut OsRng);
+    let k = <p256::ecdsa::SigningKey as p256::elliptic_curve::Generate>::generate();
     let root = issue::<_, p256::ecdsa::DerSignature>(&k, Profile::Root, 1, "CN=X", spki_of(k.verifying_key()), false);
     assert_eq!(TrustConfig::new(&[&root], &[], &[], &[], 202401).err(), bad);
     assert_eq!(TrustConfig::new(&[&root], &[], &[], &[SIGNER], 0).err(), bad);
@@ -281,7 +284,7 @@ fn trust_config_has_no_builtin_defaults() {
 
 #[test]
 fn attestation_parsers_survive_garbage() {
-    let k = p256::ecdsa::SigningKey::random(&mut OsRng);
+    let k = <p256::ecdsa::SigningKey as p256::elliptic_curve::Generate>::generate();
     let root = issue::<_, p256::ecdsa::DerSignature>(&k, Profile::Root, 1, "CN=X", spki_of(k.verifying_key()), false);
     let c = cfg(&root);
     let p33 = [2u8; 33];
@@ -328,3 +331,63 @@ fn attestation_parsers_survive_garbage() {
         assert!(parse_key_description(&kd).is_err());
     }
 }
+
+// x509-cert 0.3 replaced the builder's `Profile` enum with the `BuilderProfile` trait. This keeps
+// the 0.2 Root / SubCA / Manual variants these fixtures use and emits the same extensions, in the
+// same order, as x509-cert 0.2 did.
+mod fixture_profile {
+    use x509_cert::builder::profile::BuilderProfile;
+    use x509_cert::certificate::TbsCertificate;
+    use x509_cert::ext::pkix::{AuthorityKeyIdentifier, BasicConstraints, KeyUsage, KeyUsages, SubjectKeyIdentifier};
+    use x509_cert::ext::{Extension, ToExtension};
+    use x509_cert::name::Name;
+    use x509_cert::spki::SubjectPublicKeyInfoRef;
+
+    pub(super) enum Profile {
+        Root,
+        SubCA { issuer: Name, path_len_constraint: Option<u8> },
+        Manual { issuer: Option<Name> },
+    }
+
+    pub(super) struct FixtureProfile {
+        pub(super) kind: Profile,
+        pub(super) subject: Name,
+    }
+
+    impl BuilderProfile for FixtureProfile {
+        fn get_issuer(&self, subject: &Name) -> Name {
+            match &self.kind {
+                Profile::Root => subject.clone(),
+                Profile::SubCA { issuer, .. } => issuer.clone(),
+                Profile::Manual { issuer } => issuer.as_ref().unwrap_or(subject).clone(),
+            }
+        }
+
+        fn get_subject(&self) -> Name {
+            self.subject.clone()
+        }
+
+        fn build_extensions(
+            &self,
+            spk: SubjectPublicKeyInfoRef<'_>,
+            issuer_spk: SubjectPublicKeyInfoRef<'_>,
+            tbs: &TbsCertificate,
+        ) -> x509_cert::builder::Result<Vec<Extension>> {
+            let path_len_constraint = match &self.kind {
+                Profile::Manual { .. } => return Ok(Vec::new()),
+                Profile::Root => None,
+                Profile::SubCA { path_len_constraint, .. } => *path_len_constraint,
+            };
+            let subject = tbs.subject();
+            let mut exts = Vec::new();
+            exts.push(SubjectKeyIdentifier::try_from(spk)?.to_extension(subject, &exts)?);
+            if !matches!(self.kind, Profile::Root) {
+                exts.push(AuthorityKeyIdentifier::try_from(issuer_spk)?.to_extension(subject, &exts)?);
+            }
+            exts.push(BasicConstraints { ca: true, path_len_constraint }.to_extension(subject, &exts)?);
+            exts.push(KeyUsage(KeyUsages::KeyCertSign | KeyUsages::CRLSign).to_extension(subject, &exts)?);
+            Ok(exts)
+        }
+    }
+}
+use fixture_profile::{FixtureProfile, Profile};
