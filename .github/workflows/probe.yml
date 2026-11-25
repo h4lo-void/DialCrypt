@@ -1,8 +1,38 @@
-name: probe
+name: CI-probe
+
 on:
   push:
+
+permissions:
+  contents: read
+
 jobs:
-  probe:
+  rust:
+    name: Rust Workspace & Supply-Chain Audit
     runs-on: ubuntu-latest
     steps:
-      - run: echo ok
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Run workspace unit & acceptance tests
+        run: cargo test --workspace --locked
+      - name: Run crypto test-signer tests
+        run: cargo test -p aegiscall-crypto --features test-signer --locked
+      - name: Check dependencies with cargo-deny
+        uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          arguments: --locked check
+
+  android:
+    name: Android Unit & Isolation Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+          cache: gradle
+      - uses: android-actions/setup-android@v3
+      - name: Run PixelTitan debug unit tests
+        run: ./gradlew --console=plain :app:testPixelTitanDebugUnitTest
