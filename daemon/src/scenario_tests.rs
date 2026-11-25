@@ -13,7 +13,7 @@ use crate::journal::{self, encode_line, Header, Kind, State};
 use crate::monitor::MonState;
 use crate::policy::{Policy, POLICY_PATH};
 use crate::precheck::{self, REQUIRED_TOOLS, TIER2_TOOLS};
-use crate::session::{Input, Output, Phase, Session, BOOT_ID_PATH};
+use crate::session::{Input, Output, Phase, Session, BOOT_ID_PATH, END_CALL_CMD};
 use crate::sysops::Mutation;
 use crate::telephony::tests::{real_registry, real_siminfo};
 use crate::valid::hex_encode;
@@ -1091,7 +1091,7 @@ fn call_on_non_lte_nr_voice_bearer_is_a_violation() {
     let out = tick(&mut s, 2_000);
     assert!(frames_to(&out, 2).contains(&ServerMsg::Violation { code: Code::VioBearer.as_u16() }), "{:?}", frames_to(&out, 2));
     assert!(s.is_fail_closed_tripped());
-    assert!(has_key(s.sys(), "cmd telecom end-call"), "active call must be severed on fail-closed violation");
+    assert!(has_key(s.sys(), &END_CALL_CMD.join(" ")), "active call must be severed on fail-closed violation");
 }
 
 fn run_test_restore(sh: &str, journal: &std::path::Path) -> (Option<i32>, String) {

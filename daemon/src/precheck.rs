@@ -69,8 +69,10 @@ pub struct Context {
     pub tier2: Option<Tier2Plan>,
 }
 
-pub const REQUIRED_TOOLS: [&str; 12] =
-    ["iptables", "ip6tables", "iptables-restore", "ip6tables-restore", "settings", "cmd", "svc", "dumpsys", "pm", "ime", "content", "getprop"];
+pub const REQUIRED_TOOLS: [&str; 13] = [
+    "iptables", "ip6tables", "iptables-restore", "ip6tables-restore", "settings", "cmd", "svc", "dumpsys", "pm", "ime", "content",
+    "getprop", "input",
+];
 pub const TIER2_TOOLS: [&str; 5] = ["logcat", "dmesg", "swapon", "swapoff", "mkswap"];
 
 /// Exemptions allowed by the design 6.7, only when installed on the system image.

@@ -44,6 +44,8 @@ pub const FAST_CHECK_MS: u64 = 1_000;
 pub const SLOW_CHECK_MS: u64 = 2_000;
 pub const PROC_SCAN_MS: u64 = 250;
 pub const BOOT_ID_PATH: &str = "/proc/sys/kernel/random/boot_id";
+/// Ends the active call on fail-closed (see [Session::trip_fail_closed]).
+pub const END_CALL_CMD: [&str; 3] = ["input", "keyevent", "KEYCODE_ENDCALL"];
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RestoreReport {
@@ -135,10 +137,15 @@ impl<S: SysOps> Session<S> {
 
     /// Marks the session fail-closed and, when armed with an off-hook call,
     /// immediately terminates the telecom call so unguarded voice cannot leak.
+    ///
+    /// `cmd telecom` has no command that ends a call, so the daemon injects
+    /// KEYCODE_ENDCALL: the window manager policy handles it with
+    /// `TelecomManager.endCall()`. To be confirmed on device: the injected key
+    /// ends an active VoLTE / VoWiFi call on the target Pixel.
     pub(crate) fn trip_fail_closed(&mut self) {
         self.fail_closed_tripped = true;
         if self.armed && self.monitor.as_ref().and_then(|m| m.call_state) == Some(2) {
-            let _ = self.sys.apply(&Mutation::exec(&["cmd", "telecom", "end-call"]));
+            let _ = self.sys.apply(&Mutation::exec(&END_CALL_CMD));
         }
     }
 
