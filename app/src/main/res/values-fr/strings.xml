@@ -464,6 +464,8 @@
     <string name="add_replace_body">%1$s est déjà enregistré avec un autre appairage. Si vous le remplacez, les appels sécurisés entre vous seront interrompus jusqu’à ce que %1$s scanne aussi votre carte. Ne continuez que si vous êtes sûr que cette carte vient de %1$s.</string>
     <string name="add_replace_keep">Garder l’appairage actuel</string>
     <string name="add_replace_confirm">Remplacer l’appairage</string>
+    <string name="settings_strict_boot_title">Exiger un démarrage verrouillé</string>
+    <string name="settings_strict_boot_note">Refuse l’attestation matérielle d’un téléphone au démarrage déverrouillé sauf si sa clé de démarrage est approuvée.</string>
     <string name="settings_modem_title">Régime du modem vocal</string>
     <string name="modem_mode_wideband">Large bande 2400 (par défaut en voix LTE et 5G)</string>
     <string name="modem_mode_narrowband">Bande étroite 1200 (compatible codecs compressés)</string>

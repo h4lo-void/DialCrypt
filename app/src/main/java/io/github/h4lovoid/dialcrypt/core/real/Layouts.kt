@@ -5,6 +5,37 @@ import java.io.ByteArrayOutputStream
 /** One single-use PIN ticket to import into StrongBox. [material] is wiped by [RotationLayout.wipeMaterial]. */
 internal class NewTicket(val id: Int, val material: ByteArray)
 
+/** One StrongBox-wrapped single-use PIN ticket (`SecureKeyWrapper` DER). */
+internal class WrappedTicket(val id: Int, val wrappedDer: ByteArray)
+
+/**
+ * Wrapped rotation layout from nativePinSetupWrapped / nativeVaultRotateBeginWrapped:
+ * `n u8 · n × (ticketId u32 · len u16 BE · SecureKeyWrapper DER) · m u8 · m × retired ticketId u32`.
+ */
+internal class WrappedRotationLayout(val fresh: List<WrappedTicket>, val retire: IntArray) {
+    fun wipe() = fresh.forEach { it.wrappedDer.fill(0) }
+
+    companion object {
+        fun parse(data: ByteArray): WrappedRotationLayout? {
+            val r = ByteReader(data)
+            val n = r.u8() ?: return null
+            val fresh = ArrayList<WrappedTicket>(n)
+            repeat(n) {
+                val id = r.u32() ?: return null
+                val len = r.u16() ?: return null
+                if (len == 0) return null
+                val der = r.bytes(len) ?: return null
+                fresh += WrappedTicket(id.toInt(), der)
+            }
+            val m = r.u8() ?: return null
+            val retire = IntArray(m)
+            for (i in 0 until m) retire[i] = (r.u32() ?: return null).toInt()
+            if (!r.atEnd) return null
+            return WrappedRotationLayout(fresh, retire)
+        }
+    }
+}
+
 /**
  * Rotation layout from nativePinSetup / nativeVaultRotateBegin:
  * `n u8 · n × (ticketId u32 · material 32 B) · m u8 · m × retired ticketId u32`.

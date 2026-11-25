@@ -18,9 +18,10 @@ use aegiscall_crypto::{
 use aegiscall_memsec::{MessageDirection, SecretKey32};
 use aegiscall_modem::{FormantModulator, ModemGear};
 use aegiscall_trust::{
-    duress_overwrite, evidence_id, verify_attestation, AttestationVerdict, BootState, ContactProof, ContactSnapshot,
-    ContactView, NewContact, PhoneChoice, Rotation, TicketUse, TrustConfig, TrustError, UnlockOutcome, Vault,
-    MAX_CHAIN_LEN, MAX_LABEL_LEN,
+    duress_overwrite, evidence_id, parse_wrapping_public_key, verify_attestation,
+    wrap_ticket_for_strongbox, AttestationVerdict, BootState, ContactProof, ContactSnapshot,
+    ContactView, NewContact, PhoneChoice, Rotation, TicketUse, TrustConfig, TrustError,
+    UnlockOutcome, Vault, MAX_CHAIN_LEN, MAX_LABEL_LEN,
 };
 use rand_core::OsRng;
 use std::collections::VecDeque;
@@ -160,6 +161,27 @@ fn encode_rotation(r: &Rotation) -> Result<Zeroizing<Vec<u8>>, i32> {
     for (id, material) in &r.new {
         out.extend_from_slice(&id.to_be_bytes());
         out.extend_from_slice(material.as_bytes());
+    }
+    out.push(m);
+    for id in &r.retire {
+        out.extend_from_slice(&id.to_be_bytes());
+    }
+    Ok(out)
+}
+
+/// `n u8 · n × (ticket id u32 · wrapped_len u16 BE · SecureKeyWrapper DER) · m u8 · m × retired id u32`.
+fn encode_wrapped_rotation(r: &Rotation, wrap_spki: &[u8]) -> Result<Zeroizing<Vec<u8>>, i32> {
+    let pub_key = parse_wrapping_public_key(wrap_spki).map_err(|_| BAD_ARG)?;
+    let n = u8::try_from(r.new.len()).map_err(|_| INTERNAL)?;
+    let m = u8::try_from(r.retire.len()).map_err(|_| INTERNAL)?;
+    let mut out = Zeroizing::new(Vec::with_capacity(2 + 420 * r.new.len() + 4 * r.retire.len()));
+    out.push(n);
+    for (id, material) in &r.new {
+        let wrapped = wrap_ticket_for_strongbox(&pub_key, material, &mut OsRng).map_err(trust_code)?;
+        let wlen = u16::try_from(wrapped.len()).map_err(|_| INTERNAL)?;
+        out.extend_from_slice(&id.to_be_bytes());
+        out.extend_from_slice(&wlen.to_be_bytes());
+        out.extend_from_slice(&wrapped);
     }
     out.push(m);
     for id in &r.retire {
@@ -556,11 +578,15 @@ impl Session {
     /// §6.3 step 1: stage the new resume secret, then ask the app to persist the vault.
     fn on_vault_dirty(&mut self, seq: u32, contact: u32, k: u8, secret: SecretKey32, promote_first: bool) {
         let me = self.handle;
+        let full_path = matches!(self.call.path(), Some(Path::Full));
         let r = with_live(&self.app, |a| {
             if k == 0 {
                 return Err(BAD_ARG);
             }
             let vault = a.vault_mut()?;
+            if full_path {
+                let _ = vault.resume_reset_pqc_age(contact);
+            }
             if promote_first {
                 vault.resume_mark_used(contact, true).map_err(trust_code)?;
             } else if k == 1 {
@@ -819,6 +845,36 @@ impl Bridge {
         }))
     }
 
+    /// Toggles strict peer bootloader verification (`BootState::Unlocked` rejected when `strict` is true).
+    pub fn set_strict_attestation(&self, app: i64, strict: bool) -> i32 {
+        flatten(self.on_app(app, |a| {
+            a.trust.set_require_locked_boot(strict);
+            Ok(OK)
+        }))
+    }
+
+    /// Creates the vault; returns the five tickets wrapped as `SecureKeyWrapper` DER under `wrap_spki`.
+    pub fn pin_setup_wrapped(
+        &self,
+        app: i64,
+        pin: &[u8],
+        duress: &[u8],
+        wrap_spki: &[u8],
+    ) -> Result<Zeroizing<Vec<u8>>, i32> {
+        self.on_app(app, |a| {
+            if a.duress_len.is_some() {
+                return Err(LOCKED);
+            }
+            if a.vault.is_some() {
+                return Err(BAD_STATE);
+            }
+            let (vault, rot) = Vault::create(pin, duress, &mut OsRng).map_err(trust_code)?;
+            let out = encode_wrapped_rotation(&rot, wrap_spki)?;
+            a.vault = Some(Box::new(vault));
+            Ok(out)
+        })
+    }
+
     /// Creates the vault; returns the five tickets to import (rotation format). The first
     /// file comes from vault_rotate_commit.
     pub fn pin_setup(&self, app: i64, pin: &[u8], duress: &[u8]) -> Result<Zeroizing<Vec<u8>>, i32> {
@@ -995,6 +1051,16 @@ impl Bridge {
         self.on_app(app, |a| {
             let rot = a.vault_mut()?.begin_rotation(&mut OsRng).map_err(trust_code)?;
             encode_rotation(&rot)
+        })
+    }
+
+    /// Starts a rotation and wraps every new ticket into an Android `SecureKeyWrapper` DER blob
+    /// under the StrongBox `PURPOSE_WRAP_KEY` RSA-2048 public key `wrap_spki`, keeping raw ticket
+    /// bytes out of the JVM heap.
+    pub fn vault_rotate_begin_wrapped(&self, app: i64, wrap_spki: &[u8]) -> Result<Zeroizing<Vec<u8>>, i32> {
+        self.on_app(app, |a| {
+            let rot = a.vault_mut()?.begin_rotation(&mut OsRng).map_err(trust_code)?;
+            encode_wrapped_rotation(&rot, wrap_spki)
         })
     }
 

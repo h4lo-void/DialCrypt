@@ -32,8 +32,12 @@ interface UiPreferences {
     /** Preferred voice-band modem gear announced during call setup. */
     val modemMode: StateFlow<ModemMode>
         get() = kotlinx.coroutines.flow.MutableStateFlow(ModemMode.WIDEBAND)
+    /** When true, peer hardware attestation rejects `BootState::Unlocked` bootloaders. */
+    val requireLockedBootloader: StateFlow<Boolean>
+        get() = kotlinx.coroutines.flow.MutableStateFlow(false)
     fun setLanguage(language: AppLanguage)
     fun setIncomingMode(mode: IncomingMode)
     fun setShowFullNumbers(show: Boolean)
     fun setModemMode(mode: ModemMode) {}
+    fun setRequireLockedBootloader(require: Boolean) {}
 }

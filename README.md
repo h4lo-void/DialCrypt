@@ -146,9 +146,9 @@ Anything that fails along the way ends the call. There is no downgrade to an une
 | Key agreement | X25519 plus ML-KEM-1024 (FIPS 203) in a hybrid exchange. Handshake messages: `HS1` 77 B, `PATH` 2 B, `HS2` 1,600 B, `HS3` 1,729 B, `HS4` 129 B |
 | Authentication | Commitment-based SAS: five words (40 bits) read aloud in a timed voice window. SIGMA-style P-256 identity signatures made inside StrongBox and sent sealed. Android Key Attestation chains are verified |
 | Key derivation and integrity | HKDF and HMAC with SHA-384 over a running transcript hash |
-| Message encryption | XChaCha20 with a Poly1305 tag, 48 bits of it on the wire per 23-byte superframe |
-| Rekeying | X25519 DH ratchet every 375 frames; a session whose keys outlive 1,875 frames is ended |
-| Fast reconnect | Quick connect for verified contacts through a two-slot rolling secret, with ML-KEM-1024 added in the background |
+| Message encryption | XChaCha20 with a Poly1305 tag (48 bits on the wire per 23-byte superframe), per-superframe symmetric KDF chain ratcheting, single-use message key retirement, and per-epoch forgery counters |
+| Rekeying | X25519 DH ratchet every 375 frames (or early after 64 authentication failures); a session whose keys outlive 1,875 frames is ended |
+| Fast reconnect | Quick connect for verified contacts through a two-slot rolling secret (PSK-carried PQC continuity), with fresh ML-KEM-1024 mixed in the background and a hard cap of 3 unrefreshed resumes before forcing a full ML-KEM-1024 handshake |
 | Hardware | Identity key, PIN tickets, screening key and fingerprint key are held only in StrongBox (Titan M2). If StrongBox is unavailable the app refuses to start |
 | Vault | Argon2id (64 MiB, 3 passes), five single-use StrongBox tickets, ChaCha20-Poly1305, 4 KiB padding. PINs have at least 10 characters |
 | Memory | Messages exist only in RAM: `mlock`, `MADV_DONTDUMP`, `PR_SET_DUMPABLE=0` and zeroize (`aegiscall-memsec`) |
@@ -245,7 +245,7 @@ Mature end-to-end encrypted messengers are fast, audited and the right choice wh
 
 | Threat | What DialCrypt does | Limit |
 |---|---|---|
-| Carrier or tower records the call | Only encrypted modem audio is on the call. The key exchange mixes in ML-KEM-1024 | Full-path post-quantum protection applies once the background exchange completes. Until a resume top-up finishes, post-quantum secrecy comes from the earlier fast-reconnect secret chain |
+| Carrier or tower records the call | Only encrypted modem audio is on the call. The key exchange mixes in ML-KEM-1024 | Fresh post-quantum secrecy on a quick-connect (`Resume`) call applies once the background ML-KEM-1024 exchange completes; until then, post-quantum secrecy relies on the symmetric resume secret carried forward from the prior ML-KEM-1024 session, and at most 3 unrefreshed quick-connect calls are allowed before a full ML-KEM-1024 handshake is required |
 | Active man in the middle, forged or altered packets | AEAD frame authentication, commitment-based SAS, StrongBox identity signatures, attestation chain checks | An unpaired contact is only ever **Not verified** until you compare the words |
 | Phone seized afterwards | Messages exist only in RAM. The vault is protected by PIN and a one-time StrongBox credential and is dead after 5 wrong tries. A duress PIN destroys the keys | On a Magisk device, other root software may still read process memory |
 | Being forced to unlock with a fingerprint | Fingerprint answer is off by default and opens the app only for the secure call that is ringing; a restart, 12 hours, a wrong PIN or a fingerprint change brings the PIN back | Once you turn fingerprint answer on, someone who forces your finger onto the sensor during a ringing secure call gets that call: your emergency PIN cannot protect it. Fingerprint answer never gives back attempts spent on wrong PINs: after it, only the ticket it used is replaced. The 12-hour and wrong-PIN rules rest on a plain file (`bio_fresh.bin`) that root software can restore or rewrite, so on a rooted phone they do not hold. The attempt limit does not depend on that file and holds against restored files, but root software that can create Keystore entries as the app can defeat it too |

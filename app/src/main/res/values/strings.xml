@@ -463,6 +463,8 @@
     <string name="add_replace_body">%1$s is already saved with another pairing. If you replace it, secure calls between you stop until %1$s also scans your card. Only continue if you are sure this card comes from %1$s.</string>
     <string name="add_replace_keep">Keep the current pairing</string>
     <string name="add_replace_confirm">Replace pairing</string>
+    <string name="settings_strict_boot_title">Require locked peer bootloader</string>
+    <string name="settings_strict_boot_note">Reject hardware attestation from phones with an unlocked bootloader unless their custom boot key is pinned.</string>
     <string name="settings_modem_title">Voice link modem gear</string>
     <string name="modem_mode_wideband">Wideband 2400 (default for LTE and 5G voice)</string>
     <string name="modem_mode_narrowband">Narrowband 1200 (compatible with compressed codecs)</string>

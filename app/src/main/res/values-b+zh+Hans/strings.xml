@@ -462,6 +462,8 @@
     <string name="add_replace_body">%1$s 已经用另一组配对保存。更换后，在 %1$s 也扫描你的名片之前，你们之间的安全通话会中断。只有确定这张名片来自 %1$s 时才继续。</string>
     <string name="add_replace_keep">保留现在的配对</string>
     <string name="add_replace_confirm">更换配对</string>
+    <string name="settings_strict_boot_title">要求对方已锁定引导加载程序</string>
+    <string name="settings_strict_boot_note">拒绝引导加载程序未锁定且未列入自签白名单的手机硬件证明。</string>
     <string name="settings_modem_title">语音调制解调器档位</string>
     <string name="modem_mode_wideband">宽带 2400（LTE 与 5G 语音默认）</string>
     <string name="modem_mode_narrowband">窄带 1200（兼容压缩编解码器）</string>

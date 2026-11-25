@@ -414,6 +414,7 @@ private fun AppContent(
                     val incomingMode by prefs.incomingMode.collectAsState()
                     val showFullNumbers by prefs.showFullNumbers.collectAsState()
                     val modemMode by prefs.modemMode.collectAsState()
+                    val requireLockedBootloader by prefs.requireLockedBootloader.collectAsState()
                     val phoneApp = if (BuildConfig.DIALER_ROLE_UI) rememberPhoneAppSettings() else null
                     SettingsScreen(
                         language = language,
@@ -430,6 +431,8 @@ private fun AppContent(
                         onShowFullNumbers = prefs::setShowFullNumbers,
                         modemMode = modemMode,
                         onModemMode = prefs::setModemMode,
+                        requireLockedBootloader = requireLockedBootloader,
+                        onRequireLockedBootloader = prefs::setRequireLockedBootloader,
                         phoneApp = phoneApp,
                         onExit = onExit,
                         biometric = BiometricSettings(

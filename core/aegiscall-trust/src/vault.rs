@@ -81,15 +81,20 @@ const META_AAD: &[u8] = b"AegisMeta-v1 contact metadata";
 /// [`Vault::stretch_binding`]: label, and the header bytes it covers (magic through salt).
 const STRETCH_ID_LABEL: &[u8] = b"AegisVault-v2 stretch id";
 const STRETCH_ID_LEN: usize = 34;
+/// Maximum consecutive fast-resume calls permitted without completing a fresh ML-KEM-1024
+/// exchange (`k = 2` background refresh or a full handshake). Once reached, `expectation_for`
+/// withholds resume secrets for that contact so the next call runs a full PQC handshake.
+pub const MAX_UNREFRESHED_RESUMES: u8 = 3;
 const CONTACT_MAX_LEN: usize =
-    4 + 33 + 1 + 1 + MAX_LABEL_LEN + 32 + 16 + 32 + 33 + (1 + 1 + 1 + MAX_BOOT_KEY_LEN + 4 + 16);
+    4 + 33 + 1 + 1 + MAX_LABEL_LEN + 32 + 16 + 32 + 33 + 1 + (1 + 1 + 1 + MAX_BOOT_KEY_LEN + 4 + 16);
 const F_PSK: u8 = 1 << 0;
 const F_SAS: u8 = 1 << 1;
 const F_PHONE: u8 = 1 << 2;
 const F_RS_CUR: u8 = 1 << 3;
 const F_RS_NEW: u8 = 1 << 4;
 const F_ATTEST: u8 = 1 << 5;
-const F_ALL: u8 = F_PSK | F_SAS | F_PHONE | F_RS_CUR | F_RS_NEW | F_ATTEST;
+const F_RESUME_AGE: u8 = 1 << 6;
+const F_ALL: u8 = F_PSK | F_SAS | F_PHONE | F_RS_CUR | F_RS_NEW | F_ATTEST | F_RESUME_AGE;
 
 /// Argon2id cost parameters.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -340,6 +345,7 @@ struct Contact {
     attestation: Option<AttestationVerdict>,
     rs_cur: Option<SecretKey32>,
     rs_new: Option<(SecretKey32, u8)>,
+    unrefreshed_resumes: u8,
 }
 
 impl Drop for Contact {
@@ -363,6 +369,7 @@ impl Contact {
             attestation: self.attestation.clone(),
             rs_cur: self.rs_cur.clone(),
             rs_new: self.rs_new.as_ref().map(|(k, n)| (k.clone(), *n)),
+            unrefreshed_resumes: self.unrefreshed_resumes,
         }
     }
 }
@@ -439,6 +446,9 @@ impl Contact {
         if self.attestation.is_some() {
             flags |= F_ATTEST;
         }
+        if self.unrefreshed_resumes > 0 {
+            flags |= F_RESUME_AGE;
+        }
         o.push(flags);
         o.push(u8::try_from(self.label.len()).map_err(|_| TrustError::InvalidLabel)?);
         o.extend_from_slice(self.label.as_bytes());
@@ -454,6 +464,9 @@ impl Contact {
         if let Some((r, k)) = &self.rs_new {
             o.extend_from_slice(r.as_bytes());
             o.push(*k);
+        }
+        if self.unrefreshed_resumes > 0 {
+            o.push(self.unrefreshed_resumes);
         }
         if let Some(a) = &self.attestation {
             o.push(1);
@@ -499,6 +512,15 @@ impl Contact {
         } else {
             None
         };
+        let unrefreshed_resumes = if flags & F_RESUME_AGE != 0 {
+            let age = c.u8()?;
+            if age == 0 {
+                return Err(mal);
+            }
+            age
+        } else {
+            0
+        };
         let attestation = if flags & F_ATTEST != 0 {
             if c.u8()? != 1 {
                 return Err(mal);
@@ -527,6 +549,7 @@ impl Contact {
             attestation,
             rs_cur,
             rs_new,
+            unrefreshed_resumes,
         })
     }
 }
@@ -1340,6 +1363,7 @@ impl Vault {
             attestation: None,
             rs_cur: None,
             rs_new: None,
+            unrefreshed_resumes: 0,
         });
         self.content.next_contact_id = next;
         self.mark_rotation_required();
@@ -1369,6 +1393,7 @@ impl Vault {
         c.pub33 = pub33;
         c.rs_cur = None;
         c.rs_new = None;
+        c.unrefreshed_resumes = 0;
         c.attestation = None;
         self.mark_rotation_required();
         Ok(())
@@ -1419,6 +1444,7 @@ impl Vault {
     }
 
     fn view(c: &Contact) -> ContactView {
+        let usable = c.unrefreshed_resumes < MAX_UNREFRESHED_RESUMES;
         ContactView {
             id: c.id,
             pub33: c.pub33,
@@ -1427,7 +1453,7 @@ impl Vault {
             has_psk: c.psk.is_some(),
             sas_verified: c.sas_verified,
             attestation: c.attestation.clone(),
-            resume: (c.rs_cur.is_some(), c.rs_new.is_some()),
+            resume: (usable && c.rs_cur.is_some(), usable && c.rs_new.is_some()),
         }
     }
 
@@ -1477,17 +1503,22 @@ impl Vault {
     /// Handshake expectation plus, if `e164` matches a stored number, the `pub33` stored
     /// for it (only a "this number used another key" hint).
     pub fn expectation_for(&self, e164: Option<&[u8]>) -> (PeerExpectation, Option<[u8; 33]>) {
+        fn resume_usable(c: &Contact) -> bool {
+            c.unrefreshed_resumes < MAX_UNREFRESHED_RESUMES
+        }
         let mut psk = Vec::new();
         let mut resume = Vec::new();
         for c in &self.content.contacts {
             if let Some(p) = &c.psk {
                 psk.push((c.id, c.pub33, p.clone()));
             }
-            if let Some(r) = &c.rs_cur {
-                resume.push(ResumeCandidate { contact: c.id, pub33: c.pub33, secret: r.clone(), is_new: false });
-            }
-            if let Some((r, _)) = &c.rs_new {
-                resume.push(ResumeCandidate { contact: c.id, pub33: c.pub33, secret: r.clone(), is_new: true });
+            if resume_usable(c) {
+                if let Some(r) = &c.rs_cur {
+                    resume.push(ResumeCandidate { contact: c.id, pub33: c.pub33, secret: r.clone(), is_new: false });
+                }
+                if let Some((r, _)) = &c.rs_new {
+                    resume.push(ResumeCandidate { contact: c.id, pub33: c.pub33, secret: r.clone(), is_new: true });
+                }
             }
         }
         let hint = e164.and_then(|n| self.phone_tag(n).ok()).and_then(|t| {
@@ -1529,6 +1560,12 @@ impl Vault {
         Ok(())
     }
 
+    /// Resets the unrefreshed fast-resume counter after a full ML-KEM-1024 handshake.
+    pub fn resume_reset_pqc_age(&mut self, contact: u32) -> Result<(), TrustError> {
+        self.find_mut(contact)?.unrefreshed_resumes = 0;
+        Ok(())
+    }
+
     /// Step 3: peer's RESUME_SAVED(k) confirms every update <= k. Promotes `rs_new` to
     /// `rs_cur` (old value zeroized) if its update number is <= k. Returns whether it did.
     pub fn resume_promote(&mut self, contact: u32, k: u8) -> Result<bool, TrustError> {
@@ -1538,6 +1575,11 @@ impl Vault {
         let c = self.find_mut(contact)?;
         match c.rs_new.take() {
             Some((rs, staged)) if staged <= k => {
+                if k >= 2 || c.rs_cur.is_none() || c.unrefreshed_resumes >= MAX_UNREFRESHED_RESUMES {
+                    c.unrefreshed_resumes = 0;
+                } else {
+                    c.unrefreshed_resumes = c.unrefreshed_resumes.saturating_add(1);
+                }
                 c.rs_cur = Some(rs);
                 Ok(true)
             }
@@ -1552,7 +1594,12 @@ impl Vault {
     pub fn resume_mark_used(&mut self, contact: u32, used_new: bool) -> Result<(), TrustError> {
         let c = self.find_mut(contact)?;
         if used_new {
-            if let Some((rs, _)) = c.rs_new.take() {
+            if let Some((rs, staged)) = c.rs_new.take() {
+                if staged >= 2 {
+                    c.unrefreshed_resumes = 0;
+                } else {
+                    c.unrefreshed_resumes = c.unrefreshed_resumes.saturating_add(1);
+                }
                 c.rs_cur = Some(rs);
             }
         }

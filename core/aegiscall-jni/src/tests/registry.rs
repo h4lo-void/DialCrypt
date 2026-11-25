@@ -183,6 +183,7 @@ fn kotlin_type(rust: &str) -> &'static str {
         "NullableByteArray" => "ByteArray?",
         "JIntArray" => "IntArray",
         "JShortArray" => "ShortArray",
+        "JByteBuffer" => "java.nio.ByteBuffer",
         "jbyteArray" => "ByteArray?",
         "jstring" => "String?",
         "jshortArray" => "ShortArray?",
@@ -243,7 +244,7 @@ fn kotlin_externals() -> Vec<Decl> {
 fn exports_match_kotlin_external_funs() {
     let mut rust = rust_exports();
     let mut kotlin = kotlin_externals();
-    assert_eq!(rust.len(), 42);
+    assert_eq!(rust.len(), 46);
     rust.sort();
     kotlin.sort();
     assert_eq!(rust.len(), kotlin.len());

@@ -86,6 +86,8 @@ fun SettingsScreen(
     onShowFullNumbers: (Boolean) -> Unit = {},
     modemMode: ModemMode = ModemMode.WIDEBAND,
     onModemMode: (ModemMode) -> Unit = {},
+    requireLockedBootloader: Boolean = false,
+    onRequireLockedBootloader: (Boolean) -> Unit = {},
     phoneApp: PhoneAppSettings? = null,
     onExit: (() -> Unit)? = null,
     biometric: BiometricSettings? = null,
@@ -132,6 +134,14 @@ fun SettingsScreen(
                     stringResource(R.string.settings_full_numbers_note),
                     showFullNumbers,
                     onShowFullNumbers,
+                )
+                GroupDivider()
+                ToggleRow(
+                    Icons.Filled.Shield,
+                    stringResource(R.string.settings_strict_boot_title),
+                    stringResource(R.string.settings_strict_boot_note),
+                    requireLockedBootloader,
+                    onRequireLockedBootloader,
                 )
             }
             Card {

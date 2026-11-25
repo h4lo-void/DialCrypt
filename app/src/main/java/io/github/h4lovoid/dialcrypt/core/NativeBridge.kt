@@ -79,13 +79,27 @@ object NativeBridge {
 
     external fun nativeSetIdentity(app: Long, spkiDer: ByteArray, chainTlv: ByteArray): Int
 
+    /** Requires locked peer bootloaders during attestation when [strict] is true. */
+    external fun nativeSetStrictAttestation(app: Long, strict: Boolean): Int
+
     /** Creates the vault; returns the rotation layout (five tickets to import), then call nativeVaultRotateCommit. */
     external fun nativePinSetup(app: Long, pinUtf8: ByteArray, duressUtf8: ByteArray): ByteArray?
+
+    /** Like [nativePinSetup], wrapping each ticket under the StrongBox RSA-2048 wrapping public key [wrapSpkiDer]. */
+    external fun nativePinSetupWrapped(app: Long, pinUtf8: ByteArray, duressUtf8: ByteArray, wrapSpkiDer: ByteArray): ByteArray?
 
     external fun nativePinBegin(app: Long, vaultBlob: ByteArray, pinUtf8: ByteArray, liveTickets: IntArray): ByteArray?
 
     /** Phase 1 with the PIN stretch kept for fingerprint answer (32 bytes); same output and phase 2 as [nativePinBegin]. */
     external fun nativePinBeginStretch(app: Long, vaultBlob: ByteArray, stretch32: ByteArray, liveTickets: IntArray): ByteArray?
+
+    /** Zero-heap-copy variant of [nativePinBeginStretch]: reads and scrubs a direct off-heap [java.nio.ByteBuffer] in Rust. */
+    external fun nativePinBeginStretchDirect(
+        app: Long,
+        vaultBlob: ByteArray,
+        stretchDirect: java.nio.ByteBuffer,
+        liveTickets: IntArray,
+    ): ByteArray?
 
     /** 32-byte id of the vault's PIN stretch; the same for every file of one vault. Null for a malformed file. */
     external fun nativeVaultStretchBinding(vaultBlob: ByteArray): ByteArray?
@@ -119,6 +133,9 @@ object NativeBridge {
     external fun nativeStretchHeld(app: Long, held: Boolean): Int
 
     external fun nativeVaultRotateBegin(app: Long): ByteArray?
+
+    /** Starts a rotation and returns tickets wrapped as `SecureKeyWrapper` DER under [wrapSpkiDer]. */
+    external fun nativeVaultRotateBeginWrapped(app: Long, wrapSpkiDer: ByteArray): ByteArray?
 
     external fun nativeVaultRotateCommit(app: Long, imported: Boolean): ByteArray?
 

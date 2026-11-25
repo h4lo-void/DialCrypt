@@ -6,10 +6,10 @@ use crate::bridge::{harden, Bridge};
 use crate::bridge::{MAX_CODE_LEN, MAX_LABEL_BYTES, MAX_PHONE_LEN, MAX_TEXT_LEN};
 use crate::code::BAD_ARG;
 use aegiscall_trust::MAX_PIN_LEN;
-use jni::objects::{JByteArray, JIntArray, JObject, JShortArray};
+use jni::objects::{JByteArray, JByteBuffer, JIntArray, JObject, JShortArray};
 use jni::sys::{jboolean, jbyteArray, jint, jlong, jshortArray, jstring, JNI_TRUE};
 use jni::JNIEnv;
-use zeroize::Zeroizing;
+use zeroize::{Zeroize, Zeroizing};
 
 /// Largest byte array accepted from Java.
 const MAX_IN_LEN: usize = 2 * 1024 * 1024;
@@ -154,6 +154,34 @@ pub extern "system" fn Java_io_github_h4lovoid_dialcrypt_core_NativeBridge_nativ
 }
 
 #[no_mangle]
+pub extern "system" fn Java_io_github_h4lovoid_dialcrypt_core_NativeBridge_nativeSetStrictAttestation<'l>(
+    _env: JNIEnv<'l>,
+    _this: JObject<'l>,
+    app: jlong,
+    strict: jboolean,
+) -> jint {
+    bridge().set_strict_attestation(app, flag(strict))
+}
+
+#[no_mangle]
+pub extern "system" fn Java_io_github_h4lovoid_dialcrypt_core_NativeBridge_nativePinSetupWrapped<'l>(
+    env: JNIEnv<'l>,
+    _this: JObject<'l>,
+    app: jlong,
+    pin_utf8: JByteArray<'l>,
+    duress_utf8: JByteArray<'l>,
+    wrap_spki_der: JByteArray<'l>,
+) -> jbyteArray {
+    let r = (|| {
+        let pin = bytes_max(&env, &pin_utf8, MAX_PIN_LEN)?;
+        let duress = bytes_max(&env, &duress_utf8, MAX_PIN_LEN)?;
+        let wrap_spki = bytes_max(&env, &wrap_spki_der, 4096)?;
+        bridge().pin_setup_wrapped(app, &pin, &duress, &wrap_spki)
+    })();
+    out_bytes(&env, r)
+}
+
+#[no_mangle]
 pub extern "system" fn Java_io_github_h4lovoid_dialcrypt_core_NativeBridge_nativePinSetup<'l>(
     env: JNIEnv<'l>,
     _this: JObject<'l>,
@@ -201,6 +229,40 @@ pub extern "system" fn Java_io_github_h4lovoid_dialcrypt_core_NativeBridge_nativ
         let stretch = bytes_max(&env, &stretch32, 32)?;
         let live = ints(&env, &live_tickets)?;
         bridge().pin_begin_stretch(app, &blob, &stretch, &live)
+    })();
+    out_bytes(&env, r)
+}
+
+#[no_mangle]
+pub extern "system" fn Java_io_github_h4lovoid_dialcrypt_core_NativeBridge_nativePinBeginStretchDirect<'l>(
+    env: JNIEnv<'l>,
+    _this: JObject<'l>,
+    app: jlong,
+    vault_blob: JByteArray<'l>,
+    stretch_direct: JByteBuffer<'l>,
+    live_tickets: JIntArray<'l>,
+) -> jbyteArray {
+    let r = (|| {
+        if stretch_direct.is_null() {
+            return Err(BAD_ARG);
+        }
+        let ptr = env.get_direct_buffer_address(&stretch_direct).map_err(|_| BAD_ARG)?;
+        let cap = env.get_direct_buffer_capacity(&stretch_direct).map_err(|_| BAD_ARG)?;
+        if ptr.is_null() || cap < 32 {
+            return Err(BAD_ARG);
+        }
+        let mut stretch = Zeroizing::new([0u8; 32]);
+        // SAFETY: `ptr` is a non-null direct NIO buffer owned by the caller on this JNI thread
+        // with verified capacity >= 32 bytes; we copy 32 bytes into a zeroizing buffer and
+        // immediately scrub the direct buffer in place.
+        unsafe {
+            std::ptr::copy_nonoverlapping(ptr, stretch.as_mut_ptr(), 32);
+            let full = std::slice::from_raw_parts_mut(ptr, cap);
+            full.zeroize();
+        }
+        let blob = bytes(&env, &vault_blob)?;
+        let live = ints(&env, &live_tickets)?;
+        bridge().pin_begin_stretch(app, &blob, stretch.as_slice(), &live)
     })();
     out_bytes(&env, r)
 }
@@ -273,6 +335,17 @@ pub extern "system" fn Java_io_github_h4lovoid_dialcrypt_core_NativeBridge_nativ
 #[no_mangle]
 pub extern "system" fn Java_io_github_h4lovoid_dialcrypt_core_NativeBridge_nativeVaultRotateBegin<'l>(env: JNIEnv<'l>, _this: JObject<'l>, app: jlong) -> jbyteArray {
     out_bytes(&env, bridge().vault_rotate_begin(app))
+}
+
+#[no_mangle]
+pub extern "system" fn Java_io_github_h4lovoid_dialcrypt_core_NativeBridge_nativeVaultRotateBeginWrapped<'l>(
+    env: JNIEnv<'l>,
+    _this: JObject<'l>,
+    app: jlong,
+    wrap_spki_der: JByteArray<'l>,
+) -> jbyteArray {
+    let r = bytes_max(&env, &wrap_spki_der, 4096).and_then(|spki| bridge().vault_rotate_begin_wrapped(app, &spki));
+    out_bytes(&env, r)
 }
 
 #[no_mangle]
